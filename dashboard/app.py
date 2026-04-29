@@ -143,6 +143,16 @@ def filter_by_zip(df, zip_lat, zip_lon, radius_km):
     return df[dists <= radius_km].copy()
 
 
+def _clean_str(val):
+    """Return None if val is NaN/None, else str."""
+    if val is None:
+        return None
+    if isinstance(val, float) and math.isnan(val):
+        return None
+    s = str(val).strip()
+    return s if s else None
+
+
 def _safe_float(val, default=0.0):
     try:
         v = float(val)
@@ -272,7 +282,7 @@ def fetch_osm_stores(bbox: tuple) -> pd.DataFrame:
     if _STORE_SIZE_OK:
         store_models = [
             Store(store_id=str(sid), name=row["name"], lat=row["lat"], lon=row["lon"],
-                  category=row["category"], brand=row.get("brand"),
+                  category=row["category"], brand=_clean_str(row.get("brand")),
                   square_footage=0.0)
             for sid, row in df.iterrows()
         ]
@@ -668,7 +678,7 @@ def main():
                             gp = GooglePlacesLoader(api_key=google_api_key.strip())
                             sm_list = [
                                 Store(store_id=str(sid), name=row["name"], lat=row["lat"], lon=row["lon"],
-                                      category=row.get("category"), brand=row.get("brand"))
+                                      category=row.get("category"), brand=_clean_str(row.get("brand")))
                                 for sid, row in stores_df.iterrows()
                             ]
                             gp.enrich_stores(sm_list, search_radius_m=150)
@@ -687,7 +697,7 @@ def main():
                             yl = YelpLoader(api_key=yelp_api_key.strip())
                             sm_list = [
                                 Store(store_id=str(sid), name=row["name"], lat=row["lat"], lon=row["lon"],
-                                      category=row.get("category"), brand=row.get("brand"))
+                                      category=row.get("category"), brand=_clean_str(row.get("brand")))
                                 for sid, row in stores_df.iterrows()
                             ]
                             yl.enrich_stores(sm_list, search_radius_m=200)
@@ -702,7 +712,7 @@ def main():
                     if _ENRICHMENT_OK:
                         sm_list = [
                             Store(store_id=str(sid), name=row["name"], lat=row["lat"], lon=row["lon"],
-                                  category=row.get("category"), brand=row.get("brand"),
+                                  category=row.get("category"), brand=_clean_str(row.get("brand")),
                                   square_footage=row.get("square_footage", 0.0),
                                   avg_rating=row.get("avg_rating", 0.0),
                                   price_level=int(row.get("price_level", 2)))
