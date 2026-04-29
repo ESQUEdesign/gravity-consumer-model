@@ -103,6 +103,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+_APP_VERSION = "1.1.0"  # batch Census API fix
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -597,7 +599,7 @@ def main():
             yelp_api_key = st.text_input("Yelp Fusion", type="password", placeholder="Free: 5000/day")
 
         st.divider()
-        st.caption("Census ACS + OSM + OSRM + BLS + Store DB")
+        st.caption(f"Census ACS + OSM + OSRM + BLS + Store DB | v{_APP_VERSION}")
 
     # ── Resolve geography ────────────────────────────────────────────────
     if "bbox_radius" not in dir():
