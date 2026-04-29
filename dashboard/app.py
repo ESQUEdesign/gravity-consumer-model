@@ -559,7 +559,7 @@ def main():
             county_labels, county_fips_list = ["(loading)"], ["000"]
         else:
             county_labels = [
-                f"{row['county_name']} (pop: {row.get('population', 0):,})"
+                f"{row['county_name']} (pop: {_sf(row.get('population', 0), ',.0f')})"
                 for _, row in counties_df.iterrows()
             ]
             county_fips_list = counties_df["county_fips"].tolist()
@@ -1093,7 +1093,7 @@ def main():
             st.divider()
             st.subheader("Demand Heatmap")
             opts = store_results.head(15).apply(
-                lambda r: f"{r['name'][:30]} ({r['share']:.3%})", axis=1)
+                lambda r: f"{r['name'][:30]} ({_sf(r['share'], '.4%')})", axis=1)
             sel = st.selectbox("Select store", opts.values)
             idx = opts[opts == sel].index[0]
             row = store_results.loc[idx]
