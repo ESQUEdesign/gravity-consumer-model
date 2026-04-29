@@ -103,6 +103,57 @@ _ACS_VARIABLES: list[str] = [
     "B03002_004E",  # Black alone, not Hispanic
     "B03002_006E",  # Asian alone, not Hispanic
     "B03002_012E",  # Hispanic or Latino
+    # --- Lifestyle / psychographic indicator variables ---
+    # Education attainment (B15003)
+    "B15003_001E",  # total population 25+
+    "B15003_022E",  # bachelor's degree
+    "B15003_023E",  # master's degree
+    "B15003_024E",  # professional school degree
+    "B15003_025E",  # doctorate degree
+    # Housing tenure (B25003)
+    "B25003_001E",  # total occupied housing units
+    "B25003_002E",  # owner occupied
+    "B25003_003E",  # renter occupied
+    # Median home value
+    "B25077_001E",  # median home value (owner-occupied)
+    # Occupation (C24010 — collapsed; B24010 unavailable at BG level)
+    "C24010_001E",  # total civilian employed 16+
+    "C24010_003E",  # male: management/business/science/arts
+    "C24010_004E",  # male: service
+    "C24010_005E",  # male: sales and office
+    "C24010_006E",  # male: natural resources/construction/maintenance
+    "C24010_007E",  # male: production/transportation
+    "C24010_009E",  # female: management/business/science/arts
+    "C24010_010E",  # female: service
+    "C24010_011E",  # female: sales and office
+    "C24010_012E",  # female: natural resources/construction/maintenance
+    "C24010_013E",  # female: production/transportation
+    # Vehicles available (B08201)
+    "B08201_001E",  # total households (vehicles)
+    "B08201_002E",  # no vehicle
+    "B08201_003E",  # 1 vehicle
+    "B08201_004E",  # 2 vehicles
+    "B08201_005E",  # 3+ vehicles
+    # Commute mode (B08301)
+    "B08301_001E",  # total workers 16+
+    "B08301_003E",  # drove alone
+    "B08301_004E",  # carpooled
+    "B08301_010E",  # public transportation
+    "B08301_019E",  # walked
+    "B08301_021E",  # worked from home
+    # Housing structure type (B25024)
+    "B25024_001E",  # total housing units
+    "B25024_002E",  # 1-unit detached
+    "B25024_003E",  # 1-unit attached
+    "B25024_004E",  # 2 units
+    "B25024_005E",  # 3-4 units
+    "B25024_006E",  # 5-9 units
+    "B25024_007E",  # 10-19 units
+    "B25024_008E",  # 20-49 units
+    "B25024_009E",  # 50+ units
+    "B25024_010E",  # mobile home
+    # Neighborhood age proxy
+    "B25035_001E",  # median year structure built
 ]
 
 # Centroid lat/lon come from the Census gazetteer; the API returns the
@@ -198,6 +249,97 @@ def _build_race_distribution(row: dict) -> dict[str, int]:
     }
 
 
+def _build_lifestyle_indicators(row: dict) -> dict[str, float]:
+    """Compute lifestyle/psychographic ratios from Census ACS variables."""
+    indicators: dict[str, float] = {}
+
+    # Education: % with bachelor's or higher
+    edu_total = _safe_int(row.get("B15003_001E", 0))
+    if edu_total > 0:
+        bachelors_plus = sum(_safe_int(row.get(v, 0))
+                            for v in ["B15003_022E", "B15003_023E",
+                                      "B15003_024E", "B15003_025E"])
+        grad = sum(_safe_int(row.get(v, 0))
+                   for v in ["B15003_023E", "B15003_024E", "B15003_025E"])
+        indicators["pct_bachelors_plus"] = bachelors_plus / edu_total
+        indicators["pct_graduate_degree"] = grad / edu_total
+    else:
+        indicators["pct_bachelors_plus"] = 0.0
+        indicators["pct_graduate_degree"] = 0.0
+
+    # Housing tenure
+    tenure_total = _safe_int(row.get("B25003_001E", 0))
+    if tenure_total > 0:
+        indicators["pct_owner_occupied"] = _safe_int(row.get("B25003_002E", 0)) / tenure_total
+        indicators["pct_renter_occupied"] = _safe_int(row.get("B25003_003E", 0)) / tenure_total
+    else:
+        indicators["pct_owner_occupied"] = 0.0
+        indicators["pct_renter_occupied"] = 0.0
+
+    # Home value
+    indicators["median_home_value"] = _safe_float(row.get("B25077_001E", 0.0))
+
+    # Occupation
+    occ_total = _safe_int(row.get("C24010_001E", 0))
+    if occ_total > 0:
+        white_collar = (_safe_int(row.get("C24010_003E", 0))
+                        + _safe_int(row.get("C24010_009E", 0)))
+        service = (_safe_int(row.get("C24010_004E", 0))
+                   + _safe_int(row.get("C24010_010E", 0)))
+        blue_collar = sum(_safe_int(row.get(v, 0)) for v in [
+            "C24010_006E", "C24010_007E", "C24010_012E", "C24010_013E"])
+        indicators["pct_white_collar"] = white_collar / occ_total
+        indicators["pct_service_occ"] = service / occ_total
+        indicators["pct_blue_collar"] = blue_collar / occ_total
+    else:
+        indicators["pct_white_collar"] = 0.0
+        indicators["pct_service_occ"] = 0.0
+        indicators["pct_blue_collar"] = 0.0
+
+    # Vehicles
+    veh_total = _safe_int(row.get("B08201_001E", 0))
+    if veh_total > 0:
+        indicators["pct_no_vehicle"] = _safe_int(row.get("B08201_002E", 0)) / veh_total
+        indicators["pct_2plus_vehicles"] = (
+            _safe_int(row.get("B08201_004E", 0))
+            + _safe_int(row.get("B08201_005E", 0))
+        ) / veh_total
+    else:
+        indicators["pct_no_vehicle"] = 0.0
+        indicators["pct_2plus_vehicles"] = 0.0
+
+    # Commute
+    commute_total = _safe_int(row.get("B08301_001E", 0))
+    if commute_total > 0:
+        indicators["pct_public_transit"] = _safe_int(row.get("B08301_010E", 0)) / commute_total
+        indicators["pct_work_from_home"] = _safe_int(row.get("B08301_021E", 0)) / commute_total
+        indicators["pct_drove_alone"] = _safe_int(row.get("B08301_003E", 0)) / commute_total
+    else:
+        indicators["pct_public_transit"] = 0.0
+        indicators["pct_work_from_home"] = 0.0
+        indicators["pct_drove_alone"] = 0.0
+
+    # Housing structure type
+    struct_total = _safe_int(row.get("B25024_001E", 0))
+    if struct_total > 0:
+        single_family = (_safe_int(row.get("B25024_002E", 0))
+                         + _safe_int(row.get("B25024_003E", 0)))
+        multi_5plus = sum(_safe_int(row.get(v, 0)) for v in [
+            "B25024_006E", "B25024_007E", "B25024_008E", "B25024_009E"])
+        indicators["pct_single_family"] = single_family / struct_total
+        indicators["pct_multi_unit_5plus"] = multi_5plus / struct_total
+        indicators["pct_mobile_home"] = _safe_int(row.get("B25024_010E", 0)) / struct_total
+    else:
+        indicators["pct_single_family"] = 0.0
+        indicators["pct_multi_unit_5plus"] = 0.0
+        indicators["pct_mobile_home"] = 0.0
+
+    # Neighborhood age
+    indicators["median_year_built"] = _safe_float(row.get("B25035_001E", 0.0))
+
+    return indicators
+
+
 def _row_to_origin(row: dict, lat: float = 0.0, lon: float = 0.0) -> ConsumerOrigin:
     """Convert a single Census API row dict into a ``ConsumerOrigin``."""
     # Build the GEOID for the block group (state+county+tract+bg)
@@ -215,6 +357,7 @@ def _row_to_origin(row: dict, lat: float = 0.0, lon: float = 0.0) -> ConsumerOri
     demographics = {
         **_build_age_distribution(row),
         **_build_race_distribution(row),
+        **_build_lifestyle_indicators(row),
     }
 
     return ConsumerOrigin(

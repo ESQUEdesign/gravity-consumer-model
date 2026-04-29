@@ -91,6 +91,14 @@ try:
 except Exception:
     _BLS_OK = False
 
+try:
+    from gravity.segmentation.census_psychographics import (
+        CensusPsychographicClassifier, SEGMENT_PROFILES,
+    )
+    _PSYCHO_OK = True
+except Exception:
+    _PSYCHO_OK = False
+
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -103,7 +111,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-_APP_VERSION = "1.1.0"  # batch Census API fix
+_APP_VERSION = "1.2.0"  # psychographic segmentation
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -765,6 +773,21 @@ def main():
                     # Step 10: Demographics
                     demo_summary = aggregate_demographics(origins_df)
 
+                    # Step 11: Psychographic segments
+                    psycho_df = None
+                    psycho_summary = None
+                    if _PSYCHO_OK:
+                        try:
+                            st.write("Classifying lifestyle segments...")
+                            classifier = CensusPsychographicClassifier()
+                            psycho_df = classifier.classify(origins_df)
+                            psycho_summary = classifier.segment_summary(psycho_df)
+                            data_sources.append("Census Psychographics")
+                            n_segs = psycho_summary["segment_code"].nunique() if psycho_summary is not None else 0
+                            st.write(f"{n_segs} lifestyle segments identified")
+                        except Exception as e:
+                            st.write(f"Psychographics: {e}")
+
                     n_models = sum(1 for r in model_results.values() if r and "error" not in r)
                     status.update(label=f"Done — {n_models} models, {len(data_sources)} data sources", state="complete")
 
@@ -776,6 +799,7 @@ def main():
                     "data_sources": data_sources, "demo_summary": demo_summary,
                     "bls_county": bls_county, "bls_retail": bls_retail,
                     "dist_matrix": dist_matrix,
+                    "psycho_df": psycho_df, "psycho_summary": psycho_summary,
                 })
 
         # Retrieve from session state
@@ -832,8 +856,8 @@ def main():
         c5.metric("HHI", _sf(active_results['hhi'], '.0f'))
 
         # ── Tabs ─────────────────────────────────────────────────────────
-        tab_overview, tab_demo, tab_competition, tab_scenario = st.tabs([
-            "Market Overview", "Demographics", "Competition", "Scenario",
+        tab_overview, tab_demo, tab_psycho, tab_competition, tab_scenario = st.tabs([
+            "Market Overview", "Demographics", "Psychographics", "Competition", "Scenario",
         ])
 
         # ── Tab 1: Market Overview ───────────────────────────────────────
@@ -1027,7 +1051,171 @@ def main():
             else:
                 st.info("BLS employment data not available for this county.")
 
-        # ── Tab 3: Competition ───────────────────────────────────────────
+        # ── Tab 3: Psychographics ─────────────────────────────────────────
+        with tab_psycho:
+            import plotly.express as px
+
+            st.subheader("Consumer Lifestyle Segments")
+            st.caption(
+                "Census-derived psychographic classification using education, housing, "
+                "occupation, commute, and housing structure data as proxies for "
+                "PRIZM / Tapestry-style lifestyle segments."
+            )
+
+            psycho_df = st.session_state.get("psycho_df")
+            psycho_summary = st.session_state.get("psycho_summary")
+
+            if psycho_df is not None and "segment_name" in psycho_df.columns:
+                valid_psycho = psycho_df[psycho_df["segment_name"].notna()]
+
+                if not valid_psycho.empty:
+                    seg_counts = valid_psycho["segment_name"].value_counts()
+                    dominant = seg_counts.index[0]
+                    dominant_pct = seg_counts.iloc[0] / len(valid_psycho) * 100
+
+                    # Population-weighted dominant
+                    pop_by_seg = valid_psycho.groupby("segment_name")["population"].sum()
+                    pop_dominant = pop_by_seg.idxmax()
+                    pop_dominant_pct = pop_by_seg.max() / pop_by_seg.sum() * 100
+
+                    st.info(
+                        f"Dominant segment: **{pop_dominant}** "
+                        f"({pop_dominant_pct:.0f}% of population, "
+                        f"{seg_counts.get(pop_dominant, 0)} block groups)"
+                    )
+
+                    # Row 1: Distribution chart + summary metrics
+                    c1, c2 = st.columns([2, 1])
+                    with c1:
+                        if psycho_summary is not None and not psycho_summary.empty:
+                            colors = psycho_summary["color"].tolist()
+                            fig = px.bar(
+                                psycho_summary,
+                                x="segment_name", y="total_population",
+                                color="segment_name",
+                                color_discrete_sequence=colors,
+                                labels={"segment_name": "Segment", "total_population": "Population"},
+                                title="Segment Distribution (by population)",
+                            )
+                            fig.update_layout(
+                                height=400, showlegend=False,
+                                margin=dict(l=0, r=20, t=40, b=80),
+                                xaxis_tickangle=-35,
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+                    with c2:
+                        st.metric("Segments Found", len(seg_counts))
+                        st.metric("Block Groups Classified", len(valid_psycho))
+                        st.metric("Total Population", f"{int(valid_psycho['population'].sum()):,}")
+                        if psycho_summary is not None and not psycho_summary.empty:
+                            avg_inc = psycho_summary.loc[
+                                psycho_summary["segment_name"] == pop_dominant, "avg_income"
+                            ]
+                            if not avg_inc.empty:
+                                st.metric(
+                                    f"Avg Income ({pop_dominant[:15]})",
+                                    f"${_sf(avg_inc.iloc[0], ',.0f')}"
+                                )
+
+                    # Row 2: Segment profile cards
+                    st.divider()
+                    st.subheader("Segment Profiles")
+
+                    selected_seg = st.selectbox(
+                        "Select a segment to view profile",
+                        seg_counts.index.tolist(),
+                    )
+
+                    # Find the segment code for the selected name
+                    seg_code = None
+                    if _PSYCHO_OK:
+                        for code, profile in SEGMENT_PROFILES.items():
+                            if profile["name"] == selected_seg:
+                                seg_code = code
+                                break
+
+                    if seg_code and seg_code in SEGMENT_PROFILES:
+                        profile = SEGMENT_PROFILES[seg_code]
+                        pc1, pc2 = st.columns([1, 1])
+                        with pc1:
+                            st.markdown(f"**{profile['name']}** (`{seg_code}`)")
+                            st.markdown(profile["description"])
+                        with pc2:
+                            behavior = profile.get("consumer_behavior", {})
+                            st.markdown("**Consumer Behavior**")
+                            st.markdown(f"- **Retail Affinity:** {', '.join(behavior.get('retail_affinity', []))}")
+                            st.markdown(f"- **Price Sensitivity:** {behavior.get('price_sensitivity', 'N/A')}")
+                            st.markdown(f"- **Brand Loyalty:** {behavior.get('brand_loyalty', 'N/A')}")
+                            st.markdown(f"- **Shopping Frequency:** {behavior.get('shopping_frequency', 'N/A')}")
+                            st.markdown(f"- **Channel Preference:** {behavior.get('channel_preference', 'N/A')}")
+
+                    # Row 3: Summary table
+                    st.divider()
+                    st.subheader("All Segments Summary")
+                    if psycho_summary is not None and not psycho_summary.empty:
+                        display_summary = psycho_summary[[
+                            "segment_name", "block_groups", "total_population",
+                            "avg_income", "pct_of_population",
+                        ]].copy()
+                        display_summary["total_population"] = display_summary["total_population"].apply(
+                            lambda x: _sf(x, ',.0f'))
+                        display_summary["avg_income"] = display_summary["avg_income"].apply(
+                            lambda x: f"${_sf(x, ',.0f')}")
+                        display_summary["pct_of_population"] = display_summary["pct_of_population"].apply(
+                            lambda x: _sf(x, '.1%') if isinstance(x, (int, float)) else x)
+                        st.dataframe(
+                            display_summary.rename(columns={
+                                "segment_name": "Segment",
+                                "block_groups": "Block Groups",
+                                "total_population": "Population",
+                                "avg_income": "Avg Income",
+                                "pct_of_population": "% of Pop",
+                            }),
+                            use_container_width=True, hide_index=True,
+                        )
+
+                    # Row 4: Scatter — income vs education by segment
+                    st.divider()
+                    st.subheader("Segment Characteristics")
+                    scatter_data = []
+                    for idx, row in valid_psycho.iterrows():
+                        demo = row.get("demographics", {})
+                        if isinstance(demo, dict):
+                            scatter_data.append({
+                                "median_income": _safe_float(row.get("median_income", 0)),
+                                "pct_bachelors": _safe_float(demo.get("pct_bachelors_plus", 0)) * 100,
+                                "pct_owner": _safe_float(demo.get("pct_owner_occupied", 0)) * 100,
+                                "segment": row.get("segment_name", "Unknown"),
+                                "population": int(row.get("population", 0)),
+                            })
+                    if scatter_data:
+                        scatter_df = pd.DataFrame(scatter_data)
+                        scatter_df = scatter_df[scatter_df["median_income"] > 0]
+                        if not scatter_df.empty:
+                            fig = px.scatter(
+                                scatter_df, x="median_income", y="pct_bachelors",
+                                color="segment", size="population",
+                                labels={
+                                    "median_income": "Median Income ($)",
+                                    "pct_bachelors": "% Bachelor's Degree+",
+                                    "segment": "Segment",
+                                },
+                                title="Income vs Education by Segment",
+                                opacity=0.7,
+                            )
+                            fig.update_layout(
+                                height=450, margin=dict(l=0, r=20, t=40, b=20),
+                                xaxis_tickformat="$,.0f",
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+                else:
+                    st.info("No block groups could be classified. Census data may be too sparse.")
+            else:
+                st.info("Psychographic data not available. Run an analysis to generate segments.")
+
+        # ── Tab 4: Competition ───────────────────────────────────────────
         with tab_competition:
             import plotly.express as px
 
@@ -1168,11 +1356,12 @@ def main():
         **What you get:**
         - **Market Overview** — top stores, market share, concentration metrics
         - **Demographics** — age, race/ethnicity, income, households, BLS employment
+        - **Psychographics** — 12 PRIZM-style lifestyle segments derived from Census data (education, housing, occupation, commute, vehicles)
         - **Competition** — fair share index, agglomeration analysis, distance decay, demand heatmaps
         - **Scenario** — hypothetical new store impact simulation
 
         **Data sources (all free, no keys required):**
-        Census ACS, OpenStreetMap, OSRM, BLS QCEW, 418-brand store size database
+        Census ACS (95 variables), OpenStreetMap, OSRM, BLS QCEW, 418-brand store size database
 
         **Optional:** Google Places API, Yelp Fusion API (keys in sidebar)
 
