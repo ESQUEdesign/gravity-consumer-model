@@ -455,10 +455,13 @@ class CensusLoader:
         county_fips: Optional[str],
         year: int,
     ) -> list[dict]:
-        """Query the Census API directly with ``requests``."""
+        """Query the Census API directly with ``requests``.
+
+        The Census API limits requests to 50 variables, so we split
+        into batches and merge the results by geographic key.
+        """
         import requests
 
-        get_vars = ",".join(_ACS_VARIABLES)
         url = f"{self.BASE_URL}/{year}/{self.dataset}"
 
         if county_fips:
@@ -468,27 +471,48 @@ class CensusLoader:
             for_clause = "block group:*"
             in_clause = f"state:{state_fips}"
 
-        params: dict[str, str] = {
-            "get": get_vars,
-            "for": for_clause,
-            "in": in_clause,
-        }
-        if self.api_key:
-            params["key"] = self.api_key
+        # Split variables into batches of 49 (leave room for geo fields)
+        max_per_batch = 49
+        var_batches = [
+            _ACS_VARIABLES[i:i + max_per_batch]
+            for i in range(0, len(_ACS_VARIABLES), max_per_batch)
+        ]
 
-        resp = requests.get(url, params=params, timeout=120)
-        resp.raise_for_status()
-        payload: list[list[str]] = resp.json()
+        merged: dict[str, dict] = {}  # keyed by geo identifier
 
-        if len(payload) < 2:
-            return []
+        for batch_vars in var_batches:
+            get_vars = ",".join(batch_vars)
+            params: dict[str, str] = {
+                "get": get_vars,
+                "for": for_clause,
+                "in": in_clause,
+            }
+            if self.api_key:
+                params["key"] = self.api_key
 
-        header = payload[0]
-        rows: list[dict] = []
-        for record in payload[1:]:
-            rows.append(dict(zip(header, record)))
+            resp = requests.get(url, params=params, timeout=120)
+            resp.raise_for_status()
+            payload: list[list[str]] = resp.json()
 
-        return rows
+            if len(payload) < 2:
+                continue
+
+            header = payload[0]
+            for record in payload[1:]:
+                row = dict(zip(header, record))
+                # Build a geo key from state+county+tract+block group
+                geo_key = (
+                    row.get("state", "")
+                    + row.get("county", "")
+                    + row.get("tract", "")
+                    + row.get("block group", "")
+                )
+                if geo_key in merged:
+                    merged[geo_key].update(row)
+                else:
+                    merged[geo_key] = row
+
+        return list(merged.values())
 
     # ------------------------------------------------------------------
     # Internal: centroid lookup
