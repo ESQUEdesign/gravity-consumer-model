@@ -1,0 +1,70 @@
+model:
+  layers:
+    - huff
+    - competing_destinations
+    - mixed_logit
+    - latent_class
+    - bayesian_update
+    - residual_boost
+
+huff:
+  alpha: 1.0            # attractiveness exponent
+  lambda: 2.0           # distance decay exponent
+  distance_metric: haversine  # haversine | network
+  attractiveness_field: square_footage
+
+competing_destinations:
+  delta: 0.5            # agglomeration/competition parameter
+  radius_km: 10.0       # radius for competing destination calculation
+
+gwr:
+  kernel: bisquare      # gaussian | bisquare
+  bandwidth: adaptive   # adaptive | fixed
+  fixed_bandwidth_km: 5.0
+
+mixed_logit:
+  n_draws: 500          # simulated draws for mixed logit
+  attributes:
+    - distance_km
+    - square_footage
+    - avg_rating
+    - price_level
+    - parking_spaces
+    - product_count
+  random_coefficients:
+    - distance_km
+    - avg_rating
+
+segmentation:
+  latent_classes: auto   # integer or 'auto' (BIC selection)
+  max_classes: 8
+  rfm_quintiles: 5
+  clv_model: bg_nbd      # bg_nbd | pareto_nbd
+
+temporal:
+  hmm_states:
+    - loyal
+    - exploring
+    - lapsing
+    - churned
+    - won_back
+  hawkes_kernel: exponential  # exponential | power_law
+  hawkes_decay: 0.1
+  bayesian_prior_weight: 0.7
+
+ml:
+  residual_model: xgboost    # xgboost | lightgbm
+  n_estimators: 500
+  learning_rate: 0.05
+  max_depth: 6
+  spatial_cv_folds: 5
+  shap_explanations: true
+
+ensemble:
+  method: bayesian_averaging  # bayesian_averaging | stacking | simple_average
+  holdout_fraction: 0.2
+
+reporting:
+  trade_area_contours: [0.5, 0.7, 0.9]
+  map_provider: OpenStreetMap
+  output_format: html         # html | pdf | json

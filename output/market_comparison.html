@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gravity Model — Cross-Market Comparison</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: #f5f5f5; color: #333; padding: 24px; }
+  .container { max-width: 1400px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  .subtitle { color: #666; margin-bottom: 20px; }
+  .stats { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat { background: #fff; border-radius: 8px; padding: 16px 20px;
+           box-shadow: 0 1px 3px rgba(0,0,0,.1); min-width: 160px; }
+  .stat .value { font-size: 28px; font-weight: 700; color: #111; }
+  .stat .label { font-size: 13px; color: #888; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; background: #fff;
+           border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  th { background: #1a1a2e; color: #fff; padding: 10px 12px; text-align: left;
+       font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+  td { padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 14px; }
+  tr:hover { background: #f9f9fb; }
+  td.high { background: #fee; color: #c00; font-weight: 600; }
+  td.med { background: #fff8e0; color: #a67c00; font-weight: 600; }
+  h2 { margin-top: 24px; margin-bottom: 12px; font-size: 18px; }
+  ul { margin-left: 20px; }
+  li { margin-bottom: 4px; }
+  .footer { margin-top: 24px; color: #999; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Gravity Consumer Model — Cross-Market Comparison</h1>
+  <p class="subtitle">Generated 2026-04-28 20:27:35 | Huff model (alpha=1.0, lambda=2.0, uniform attractiveness)</p>
+
+  <div class="stats">
+    <div class="stat"><div class="value">2</div><div class="label">Markets Analyzed</div></div>
+    <div class="stat"><div class="value">11,582,557</div><div class="label">Total Population</div></div>
+    <div class="stat"><div class="value">1,000</div><div class="label">Total Stores</div></div>
+    <div class="stat"><div class="value">0</div><div class="label">Failed</div></div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>Market</th><th>Population</th><th>Stores</th>
+        <th>Avg Income</th><th>Top Store</th><th>Top Share</th>
+        <th>Top-5 Conc.</th><th>HHI</th><th>Avg Dist (km)</th>
+      </tr>
+    </thead>
+    <tbody>
+      
+        <tr>
+            <td>1</td>
+            <td><strong>Los Angeles, CA</strong></td>
+            <td>9,936,690</td>
+            <td>500</td>
+            <td>$95,180</td>
+            <td>B'52</td>
+            <td>0.80%</td>
+            <td>3.8%</td>
+            <td>27</td>
+            <td>9.1</td>
+        </tr>
+        <tr>
+            <td>2</td>
+            <td><strong>New York, NY (Manhattan)</strong></td>
+            <td>1,645,867</td>
+            <td>500</td>
+            <td>$128,698</td>
+            <td>Carmelos</td>
+            <td>0.53%</td>
+            <td>2.3%</td>
+            <td>22</td>
+            <td>5.2</td>
+        </tr>
+    </tbody>
+  </table>
+
+  
+
+  <p class="footer">
+    HHI (Herfindahl-Hirschman Index): &lt;1500 = competitive, 1500-2500 = moderate, &gt;2500 = concentrated.<br>
+    Top-5 Concentration: share of total demand captured by the 5 largest stores.<br>
+    All models run with uniform store attractiveness (OSM lacks size data). Real attractiveness data would change rankings.
+  </p>
+</div>
+</body>
+</html>

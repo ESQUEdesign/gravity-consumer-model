@@ -1,0 +1,3 @@
+label,state_fips,county_fips,status,n_origins,n_stores,total_population,total_households,avg_median_income,top_store_name,top_store_share,top_store_demand,top_5_concentration,hhi,avg_distance_km,elapsed_s,error
+"New York, NY (Manhattan)",36,061,success,1157,500,1645867,913058,128698.0,Carmelos,0.005348,8802.0,0.022597,21.9,5.19,10.8,
+"Los Angeles, CA",06,037,success,6555,500,9936690,3599546,95180.0,B'52,0.007961,79105.0,0.037533,27.0,9.09,8.7,
