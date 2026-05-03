@@ -105,13 +105,49 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="Gravity Consumer Model",
-    page_icon="📍",
+    page_title="Gravity Consumer Model — Esque",
+    page_icon="◆",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-_APP_VERSION = "1.6.0"  # development analysis
+_APP_VERSION = "2.0.0"  # esque design system
+
+# ---------------------------------------------------------------------------
+# Esque design system — Plotly global template
+# ---------------------------------------------------------------------------
+import plotly.graph_objects as go
+import plotly.io as pio
+
+_esque_template = go.layout.Template(
+    layout=go.Layout(
+        paper_bgcolor="#0F0F0D",
+        plot_bgcolor="#181815",
+        font=dict(family="Georgia, serif", color="#EDE8E0"),
+        colorway=["#C4A05A", "#7A8470", "#B85C3A", "#A89F92",
+                   "#D9BC81", "#A3AE9C", "#8F7038", "#6B6A62"],
+        xaxis=dict(gridcolor="#363630", zerolinecolor="#363630"),
+        yaxis=dict(gridcolor="#363630", zerolinecolor="#363630"),
+    )
+)
+pio.templates["esque"] = _esque_template
+pio.templates.default = "esque"
+
+# Esque segment color overrides
+_ESQUE_SEGMENT_COLORS = {
+    "UP": "#C4A05A",
+    "SF": "#7A8470",
+    "AE": "#D9BC81",
+    "CT": "#B85C3A",
+    "RT": "#8F7038",
+    "UE": "#A89F92",
+    "SM": "#6B6A62",
+    "MU": "#A3AE9C",
+    "YM": "#C4A05A",
+    "WE": "#363630",
+    "GC": "#6B6A62",
+    "RL": "#D9BC81",
+}
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1644,16 +1680,17 @@ def render_store_map(store_results, origins_df, center_lat, center_lon):
         import folium
         from streamlit_folium import st_folium
 
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="CartoDB positron")
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="CartoDB dark_matter")
         max_s = store_results["share"].max()
         min_s = store_results["share"].min()
         rng = max_s - min_s if max_s > min_s else 1
 
         for sid, row in store_results.head(100).iterrows():
             intensity = (row["share"] - min_s) / rng
-            r = int(255 * intensity)
-            g = int(100 * (1 - intensity))
-            color = f"#{r:02x}{g:02x}32"
+            r = int(196 + (184 - 196) * intensity)
+            g = int(160 + (92 - 160) * intensity)
+            b = int(90 + (58 - 90) * intensity)
+            color = f"#{r:02x}{g:02x}{b:02x}"
             radius = max(3, min(12, 3 + intensity * 9))
             folium.CircleMarker(
                 location=[row["lat"], row["lon"]], radius=radius,
@@ -1674,7 +1711,7 @@ def render_origin_heatmap(prob_df, origins_df, store_id, center_lat, center_lon)
         from folium.plugins import HeatMap
         from streamlit_folium import st_folium
 
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="CartoDB positron")
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="CartoDB dark_matter")
         probs = prob_df[store_id]
         heat_data = [
             [origins_df.loc[oid, "lat"], origins_df.loc[oid, "lon"], float(p)]
@@ -1685,7 +1722,7 @@ def render_origin_heatmap(prob_df, origins_df, store_id, center_lat, center_lon)
             HeatMap(heat_data, radius=15, blur=10, max_zoom=13).add_to(m)
         folium.Marker(
             location=[center_lat, center_lon], popup=f"Store: {store_id}",
-            icon=folium.Icon(color="red", icon="star"),
+            icon=folium.Icon(color="darkred", icon="star"),
         ).add_to(m)
         st_folium(m, width=None, height=500, use_container_width=True)
     except ImportError:
@@ -1699,9 +1736,110 @@ def render_origin_heatmap(prob_df, origins_df, store_id, center_lat, center_lon)
 def main():
     st.markdown("""
     <style>
+    /* ── Esque Design System ── */
+    :root {
+        --obsidian: #0F0F0D; --obsidian-soft: #181815; --obsidian-mid: #252520;
+        --obsidian-light: #363630; --stone: #6B6A62; --sand: #A89F92;
+        --ivory: #EDE8E0; --ivory-warm: #F7F3EC;
+        --gold: #C4A05A; --gold-light: #D9BC81; --gold-dark: #8F7038;
+        --sage: #7A8470; --sage-light: #A3AE9C; --ember: #B85C3A;
+    }
+
     .block-container { padding-top: 1rem; }
-    [data-testid="stMetricValue"] { font-size: 1.8rem; }
-    [data-testid="stMetricLabel"] { font-size: 0.85rem; }
+
+    /* Typography */
+    html, body, [class*="css"] {
+        font-family: Georgia, Garamond, serif;
+        color: #EDE8E0;
+    }
+    h1, h2, h3, h4, h5, h6,
+    [data-testid="stSidebarNav"] span,
+    .stTabs [data-baseweb="tab"] {
+        font-family: 'Trebuchet MS', Arial, sans-serif;
+        color: #EDE8E0;
+    }
+    p, li, span, label { color: #EDE8E0; }
+
+    /* Background */
+    .stApp, [data-testid="stAppViewContainer"] { background-color: #0F0F0D; }
+    [data-testid="stSidebar"] { background-color: #181815; }
+    [data-testid="stHeader"] { background-color: #0F0F0D; }
+
+    /* Metrics */
+    [data-testid="stMetricValue"] { font-size: 1.8rem; color: #EDE8E0; }
+    [data-testid="stMetricLabel"] { font-size: 0.85rem; color: #A89F92; }
+    [data-testid="stMetricDelta"] svg { fill: #7A8470; }
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] { border-bottom: 1px solid rgba(168,159,146,0.18); }
+    .stTabs [data-baseweb="tab"] {
+        color: #6B6A62; background-color: transparent;
+        border-bottom: 2px solid transparent; padding: 0.5rem 1rem;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #C4A05A !important;
+        border-bottom: 2px solid #C4A05A !important;
+        background-color: transparent !important;
+    }
+
+    /* Buttons */
+    .stButton > button {
+        background-color: #C4A05A; color: #0F0F0D;
+        border: none; border-radius: 3px;
+        font-family: 'Trebuchet MS', Arial, sans-serif;
+        font-weight: 600;
+    }
+    .stButton > button:hover {
+        background-color: #D9BC81; color: #0F0F0D;
+    }
+
+    /* Inputs & selects */
+    [data-testid="stSelectbox"] > div > div,
+    [data-testid="stMultiSelect"] > div > div,
+    .stNumberInput > div > div > input,
+    .stTextInput > div > div > input,
+    .stSlider [data-baseweb="slider"] {
+        background-color: #252520; border-color: #363630; color: #EDE8E0;
+    }
+    [data-baseweb="select"] { background-color: #252520; }
+    [data-baseweb="select"] * { color: #EDE8E0 !important; }
+
+    /* Tables */
+    [data-testid="stTable"] table,
+    .stDataFrame table { background-color: #181815; color: #EDE8E0; }
+    [data-testid="stTable"] th,
+    .stDataFrame th {
+        background-color: #252520; color: #C4A05A;
+        border-bottom: 1px solid #363630;
+    }
+    [data-testid="stTable"] td,
+    .stDataFrame td { border-bottom: 1px solid rgba(168,159,146,0.12); }
+    [data-testid="stTable"] tr:nth-child(even) td,
+    .stDataFrame tr:nth-child(even) td { background-color: #252520; }
+
+    /* Expanders */
+    [data-testid="stExpander"] { background-color: #181815; border: 1px solid #363630; border-radius: 6px; }
+    [data-testid="stExpander"] summary span { color: #C4A05A; }
+
+    /* Dividers */
+    hr, [data-testid="stSeparator"] { border-color: rgba(168,159,146,0.18) !important; }
+
+    /* Sidebar labels */
+    [data-testid="stSidebar"] label { color: #A89F92; }
+    [data-testid="stSidebar"] .stMarkdown p { color: #A89F92; }
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 { color: #EDE8E0; }
+
+    /* Progress bars */
+    [data-testid="stProgress"] > div > div { background-color: #C4A05A; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: #181815; }
+    ::-webkit-scrollbar-thumb { background: #363630; border-radius: 3px; }
+
+    /* Captions & small text */
+    .stCaption, small { color: #6B6A62 !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -2480,14 +2618,14 @@ def main():
             with col_gap:
                 gap_chart = gap_df.copy()
                 gap_chart["color"] = gap_chart["status"].map(
-                    {"Underserved": "#4CAF50", "Balanced": "#FF9800", "Oversaturated": "#F44336"})
+                    {"Underserved": "#7A8470", "Balanced": "#C4A05A", "Oversaturated": "#B85C3A"})
                 fig_gap = px.bar(gap_chart, x="category", y="saturation",
                                  color="status",
-                                 color_discrete_map={"Underserved": "#4CAF50",
-                                                     "Balanced": "#FF9800",
-                                                     "Oversaturated": "#F44336"},
+                                 color_discrete_map={"Underserved": "#7A8470",
+                                                     "Balanced": "#C4A05A",
+                                                     "Oversaturated": "#B85C3A"},
                                  title="Category Saturation Index")
-                fig_gap.add_hline(y=1.0, line_dash="dash", line_color="gray",
+                fig_gap.add_hline(y=1.0, line_dash="dash", line_color="#6B6A62",
                                   annotation_text="Market equilibrium")
                 fig_gap.update_layout(height=350, xaxis_tickangle=-35,
                                       yaxis_title="Saturation (1.0 = balanced)",
@@ -2500,9 +2638,9 @@ def main():
                 fig_tam = px.bar(tam_df, x="tam", y="category", orientation="h",
                                   title="Total Addressable Market by Category",
                                   color="status",
-                                  color_discrete_map={"Underserved": "#4CAF50",
-                                                      "Balanced": "#FF9800",
-                                                      "Oversaturated": "#F44336"})
+                                  color_discrete_map={"Underserved": "#7A8470",
+                                                      "Balanced": "#C4A05A",
+                                                      "Oversaturated": "#B85C3A"})
                 fig_tam.update_layout(height=350, xaxis_tickprefix="$",
                                       xaxis_tickformat=",.0s", yaxis_title=None,
                                       margin=dict(l=0, r=20, t=40, b=20))
@@ -2573,7 +2711,7 @@ def main():
                 top20["label"] = top20["name"].str[:25]
                 top20 = top20.iloc[::-1]
                 fig = px.bar(top20, x="share", y="label", orientation="h",
-                             color="share", color_continuous_scale="RdYlGn_r",
+                             color="share", color_continuous_scale=[[0,"#C4A05A"],[0.5,"#8F7038"],[1,"#B85C3A"]],
                              title="Top 20 by Market Share")
                 fig.update_layout(height=400, showlegend=False, coloraxis_showscale=False,
                                   xaxis_tickformat=".2%", yaxis_title=None,
@@ -2616,7 +2754,7 @@ def main():
                     fig = px.bar(x=age_labels, y=age_pcts,
                                  labels={"x": "Age Group", "y": "% of Population"},
                                  title="Age Distribution", color=age_pcts,
-                                 color_continuous_scale="Blues")
+                                 color_continuous_scale=[[0,"#181815"],[0.5,"#8F7038"],[1,"#C4A05A"]])
                     fig.update_layout(height=350, showlegend=False, coloraxis_showscale=False,
                                       margin=dict(l=0, r=20, t=40, b=20))
                     st.plotly_chart(fig, use_container_width=True)
@@ -2662,7 +2800,7 @@ def main():
                     fig = px.histogram(valid_income, nbins=30, marginal="box",
                                        labels={"value": "Median Household Income ($)"},
                                        title="Block Group Income Distribution",
-                                       color_discrete_sequence=["#636EFA"])
+                                       color_discrete_sequence=["#C4A05A"])
                     fig.update_layout(height=350, showlegend=False,
                                       margin=dict(l=0, r=20, t=40, b=20))
                     st.plotly_chart(fig, use_container_width=True)
@@ -2742,7 +2880,7 @@ def main():
                     c1, c2 = st.columns([2, 1])
                     with c1:
                         if psycho_summary is not None and not psycho_summary.empty:
-                            colors = psycho_summary["color"].tolist()
+                            colors = [_ESQUE_SEGMENT_COLORS.get(c, "#C4A05A") for c in psycho_summary["segment_code"].tolist()] if "segment_code" in psycho_summary.columns else psycho_summary["color"].tolist()
                             fig = px.bar(
                                 psycho_summary,
                                 x="segment_name", y="total_population",
@@ -2932,7 +3070,7 @@ def main():
                     }).sort_values("cd_index", ascending=False).head(20)
                     cd_plot = cd_plot.iloc[::-1]
                     fig = px.bar(cd_plot, x="cd_index", y="store", orientation="h",
-                                 color="cd_index", color_continuous_scale="Viridis",
+                                 color="cd_index", color_continuous_scale=[[0,"#252520"],[0.5,"#7A8470"],[1,"#C4A05A"]],
                                  title="Store Clustering Index (top 20)")
                     fig.update_layout(height=400, showlegend=False, coloraxis_showscale=False,
                                       yaxis_title=None, margin=dict(l=0, r=20, t=40, b=20))
@@ -3114,7 +3252,7 @@ def main():
                             rss = rev_seg.sort_values("revenue", ascending=True)
                             fig_rev = px.bar(rss, x="revenue", y="segment",
                                              orientation="h", color="revenue",
-                                             color_continuous_scale="Greens",
+                                             color_continuous_scale=[[0,"#252520"],[0.5,"#7A8470"],[1,"#A3AE9C"]],
                                              title="Revenue by Consumer Segment")
                             fig_rev.update_layout(height=350, coloraxis_showscale=False,
                                                   xaxis_tickprefix="$", xaxis_tickformat=",.0f",
@@ -3136,7 +3274,7 @@ def main():
                     st.subheader("Category-Audience Fit")
                     if fit_score is not None:
                         # Gauge-style display
-                        color = "#4CAF50" if fit_score >= 70 else "#FF9800" if fit_score >= 40 else "#F44336"
+                        color = "#7A8470" if fit_score >= 70 else "#C4A05A" if fit_score >= 40 else "#B85C3A"
                         st.metric("Fit Score", f"{fit_score}/100")
                         st.progress(min(fit_score / 100, 1.0))
                         if fit_segments:
@@ -3262,13 +3400,13 @@ def main():
                     from streamlit_folium import st_folium
 
                     sc_map = folium.Map(location=[new_lat, new_lon], zoom_start=13,
-                                        tiles="CartoDB positron")
+                                        tiles="CartoDB dark_matter")
 
                     # New store pin (star)
                     folium.Marker(
                         location=[new_lat, new_lon],
                         popup=f"<b>{new_name}</b><br>{new_category}<br>{new_sqft:,} sqft",
-                        icon=folium.Icon(color="green", icon="star", prefix="fa"),
+                        icon=folium.Icon(color="darkgreen", icon="star", prefix="fa"),
                     ).add_to(sc_map)
 
                     # Existing stores (small circles)
@@ -3322,7 +3460,7 @@ def main():
                     impact["label"] = impact["name"].str[:25]
                     impact = impact.iloc[::-1]
                     fig = px.bar(impact, x="change", y="label", orientation="h",
-                                 color="change", color_continuous_scale="RdBu",
+                                 color="change", color_continuous_scale=[[0,"#B85C3A"],[0.5,"#A89F92"],[1,"#7A8470"]],
                                  title="Most Impacted Stores")
                     fig.update_layout(height=450, coloraxis_showscale=False,
                                       xaxis_tickformat=".4%", yaxis_title=None,
@@ -3336,7 +3474,7 @@ def main():
                                            "avg_share_change": cat_impact.values})
                     fig2 = px.bar(cat_df, x="avg_share_change", y="category",
                                   orientation="h", color="avg_share_change",
-                                  color_continuous_scale="RdBu",
+                                  color_continuous_scale=[[0,"#B85C3A"],[0.5,"#A89F92"],[1,"#7A8470"]],
                                   title="Impact by Category")
                     fig2.update_layout(height=450, coloraxis_showscale=False,
                                        xaxis_tickformat=".4%", yaxis_title=None,
@@ -3377,7 +3515,7 @@ def main():
                                            "premium": 90000, "luxury": 130000}
                             pl_val = price_lines.get(new_price, 60000)
                             fig_hist.add_vline(x=pl_val, line_dash="dash",
-                                               line_color="red",
+                                               line_color="#B85C3A",
                                                annotation_text=f"{new_price} target")
                             fig_hist.update_layout(
                                 height=350, showlegend=False,
@@ -3396,7 +3534,7 @@ def main():
                                 seg_chart = pd.DataFrame({"segment": sp.index, "pct": sp.values})
                                 fig3 = px.bar(seg_chart, x="pct", y="segment",
                                               orientation="h", title="Catchment Lifestyle Segments",
-                                              color="pct", color_continuous_scale="Viridis")
+                                              color="pct", color_continuous_scale=[[0,"#252520"],[0.5,"#7A8470"],[1,"#C4A05A"]])
                                 fig3.update_layout(height=350, coloraxis_showscale=False,
                                                    xaxis_title="% of catchment", yaxis_title=None,
                                                    margin=dict(l=0, r=20, t=40, b=20))
