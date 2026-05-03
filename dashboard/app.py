@@ -111,7 +111,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-_APP_VERSION = "1.4.0"  # actionable insights
+_APP_VERSION = "1.5.0"  # auto-run insights tab
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -855,6 +855,227 @@ def compute_supportable_rent(annual_revenue, sqft, category):
 
 
 # ---------------------------------------------------------------------------
+# Insights report builder
+# ---------------------------------------------------------------------------
+
+def build_insights_report(market_label, total_pop, total_hh, avg_income,
+                          stores_df, store_results, active_results,
+                          gap_df, viability, exec_summary,
+                          psycho_df, psycho_summary,
+                          bls_county, bls_retail,
+                          origins_df, bbox, rings):
+    """Synthesise pipeline outputs into a structured insights report dict."""
+    report = {}
+
+    # ── Header ──────────────────────────────────────────────────────
+    report["grade"] = viability["grade"]
+    report["score"] = viability["total"]
+    report["verdict"] = viability["verdict"]
+    report["components"] = viability.get("components", {})
+
+    # ── Opportunity gaps ────────────────────────────────────────────
+    underserved = gap_df[gap_df["status"] == "Underserved"].head(5).to_dict("records") if gap_df is not None and not gap_df.empty else []
+    oversaturated = gap_df[gap_df["status"] == "Oversaturated"].head(3).to_dict("records") if gap_df is not None and not gap_df.empty else []
+    report["underserved"] = underserved
+    report["oversaturated"] = oversaturated
+
+    # ── Consumer DNA: top 3 segments ────────────────────────────────
+    consumer_dna = []
+    if _PSYCHO_OK and psycho_summary is not None and not psycho_summary.empty:
+        ps = psycho_summary.copy()
+        if "population" in ps.columns:
+            ps = ps.sort_values("population", ascending=False)
+        for _, row in ps.head(3).iterrows():
+            code = row.get("segment_code", "")
+            pct = row.get("pct", row.get("population", 0) / max(total_pop, 1) * 100)
+            playbook = build_marketing_playbook(code) if code else None
+            consumer_dna.append({
+                "code": code,
+                "name": row.get("segment_name", code),
+                "population": int(row.get("population", 0)),
+                "pct": float(pct),
+                "playbook": playbook,
+            })
+    report["consumer_dna"] = consumer_dna
+
+    # ── Revenue potential per category ──────────────────────────────
+    rev_potential = []
+    if gap_df is not None and not gap_df.empty:
+        for _, row in gap_df.iterrows():
+            cat = row["category"]
+            tam = row.get("tam", 0)
+            actual = row.get("actual_stores", 0)
+            sat = row.get("saturation", 1.0)
+            # Rough new-entrant revenue: TAM / (actual + 1)
+            est_rev = tam / (actual + 1) if tam > 0 else 0
+            rent = compute_supportable_rent(est_rev, 5000, cat)
+            rev_potential.append({
+                "category": cat, "tam": tam, "actual_stores": actual,
+                "saturation": sat, "status": row.get("status", "Balanced"),
+                "est_new_entrant_rev": est_rev,
+                "supportable_rent_mid": rent["rent_mid"] if rent else 0,
+                "market_avg_rent": rent["market_avg"] if rent else 0,
+            })
+    report["revenue_potential"] = sorted(rev_potential, key=lambda x: x["saturation"])
+
+    # ── Competitive landscape ───────────────────────────────────────
+    hhi = active_results.get("hhi", 0)
+    if hhi < 15:
+        comp_level = "Low"
+        comp_desc = "Highly competitive market with no dominant players."
+    elif hhi < 25:
+        comp_level = "Moderate"
+        comp_desc = "Moderately concentrated — a few chains hold significant share."
+    else:
+        comp_level = "High"
+        comp_desc = "Highly concentrated — dominated by a small number of retailers."
+
+    top5_stores = []
+    if store_results is not None and not store_results.empty:
+        for _, row in store_results.head(5).iterrows():
+            top5_stores.append({
+                "name": row.get("name", ""),
+                "category": row.get("category", ""),
+                "share": float(row.get("share", 0)),
+            })
+
+    cat_counts = stores_df["category"].value_counts().head(8).to_dict() if stores_df is not None else {}
+    report["competition"] = {
+        "hhi": hhi, "level": comp_level, "description": comp_desc,
+        "top5_stores": top5_stores,
+        "top5_share": float(active_results.get("top5_concentration", 0)),
+        "category_mix": cat_counts,
+    }
+
+    # ── Actionable recommendations ──────────────────────────────────
+    recs = []
+    income_ratio = avg_income / 75_149 if avg_income > 0 else 0.5
+
+    # 1. Underserved category opportunities
+    for gap in underserved[:2]:
+        cat = gap["category"]
+        tam_m = gap.get("tam", 0) / 1e6
+        recs.append({
+            "title": f"Enter the {cat} market",
+            "detail": (f"Only {gap.get('actual_stores', 0)} stores vs "
+                       f"{gap.get('expected_stores', 0)} expected. "
+                       f"${tam_m:,.1f}M addressable market is underserved "
+                       f"(saturation: {gap.get('saturation', 0):.0%})."),
+        })
+
+    # 2. Dominant segment alignment
+    if consumer_dna:
+        top_seg = consumer_dna[0]
+        pb = top_seg.get("playbook")
+        if pb:
+            affinities = ", ".join(pb.get("retail_affinity", [])[:3])
+            recs.append({
+                "title": f"Align store format with {top_seg['name']} segment",
+                "detail": (f"{top_seg['name']} represents {top_seg['pct']:.0f}% of the "
+                           f"population. They prefer {pb.get('channel_preference', 'in-store')} "
+                           f"shopping and are drawn to {affinities}."),
+            })
+
+    # 3. Price positioning
+    if income_ratio >= 1.2:
+        recs.append({
+            "title": "Position for premium pricing",
+            "detail": (f"Area median income (${avg_income:,.0f}) is {income_ratio:.0%} of "
+                       f"national median. Consumers can support premium/specialty formats."),
+        })
+    elif income_ratio <= 0.7:
+        recs.append({
+            "title": "Lead with value positioning",
+            "detail": (f"Area median income (${avg_income:,.0f}) is {income_ratio:.0%} of "
+                       f"national median. Dollar, discount, and value formats perform best."),
+        })
+    else:
+        recs.append({
+            "title": "Target moderate price points",
+            "detail": (f"Area median income (${avg_income:,.0f}) tracks near national median. "
+                       f"Mid-tier formats with selective premium offerings fit this market."),
+        })
+
+    # 4. Competition strategy
+    if hhi >= 25:
+        recs.append({
+            "title": "Differentiate aggressively",
+            "detail": ("Market is highly concentrated. New entrants must offer a clearly "
+                       "distinct value proposition — niche category, better experience, "
+                       "or underserved format."),
+        })
+    elif hhi < 15:
+        recs.append({
+            "title": "Compete on convenience and location",
+            "detail": ("Low concentration means many small players. Winning depends on "
+                       "site selection and convenience rather than brand power."),
+        })
+
+    # 5. BLS workforce insight
+    if bls_county and bls_county.get("avg_weekly_wage", 0) > 0:
+        wage = bls_county["avg_weekly_wage"]
+        emp = bls_county.get("total_employment", 0)
+        recs.append({
+            "title": "Leverage local workforce",
+            "detail": (f"County has {emp:,.0f} employed workers at ${wage:,.0f} avg weekly wage. "
+                       f"{'Tight labor market may raise staffing costs.' if emp > 0 and wage > 900 else 'Affordable labor pool for retail staffing.'}"),
+        })
+
+    # 6. Distance ring location insight
+    pop_3mi = rings.get("3mi", {}).get("population", 0) if rings else 0
+    pop_5mi = rings.get("5mi", {}).get("population", 0) if rings else 0
+    if pop_3mi > 0:
+        if pop_3mi < 10_000:
+            recs.append({
+                "title": "Consider highway-corridor or pass-through locations",
+                "detail": (f"Only {pop_3mi:,} people within 3 miles of county center. "
+                           f"Rural density requires high-visibility roadside placement to "
+                           f"capture drive-by traffic."),
+            })
+        elif pop_3mi >= 30_000:
+            recs.append({
+                "title": "Target walkable/urban infill locations",
+                "detail": (f"{pop_3mi:,} people within 3 miles supports dense-format retail. "
+                           f"Look for mixed-use or downtown locations with foot traffic."),
+            })
+
+    # 7. Oversaturated category warning
+    for osat in oversaturated[:1]:
+        recs.append({
+            "title": f"Avoid the {osat['category']} category",
+            "detail": (f"Market has {osat.get('actual_stores', 0)} {osat['category']} stores vs "
+                       f"{osat.get('expected_stores', 0)} expected — oversaturated at "
+                       f"{osat.get('saturation', 0):.0%}. New entrants face intense competition."),
+        })
+
+    report["recommendations"] = recs
+
+    # ── Distance rings ──────────────────────────────────────────────
+    report["distance_rings"] = rings
+
+    # ── BLS summary ─────────────────────────────────────────────────
+    report["bls"] = {
+        "total_employment": bls_county.get("total_employment", 0) if bls_county else 0,
+        "avg_weekly_wage": bls_county.get("avg_weekly_wage", 0) if bls_county else 0,
+        "retail_employment": bls_retail.get("total_employment", 0) if bls_retail else 0,
+        "retail_wage": bls_retail.get("avg_weekly_wage", 0) if bls_retail else 0,
+        "sectors": bls_county.get("sectors", []) if bls_county else [],
+    }
+
+    # ── Income range ────────────────────────────────────────────────
+    inc = origins_df["median_income"]
+    inc_valid = inc[inc > 0]
+    report["income_stats"] = {
+        "min": float(inc_valid.min()) if not inc_valid.empty else 0,
+        "median": float(inc_valid.median()) if not inc_valid.empty else 0,
+        "max": float(inc_valid.max()) if not inc_valid.empty else 0,
+        "mean": float(avg_income) if avg_income > 0 else 0,
+    }
+
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Revenue prediction model
 # ---------------------------------------------------------------------------
 
@@ -1275,6 +1496,18 @@ def main():
         # ZIP filter (inline)
         zip_input = st.text_input("ZIP code (optional)", placeholder="e.g. 78701")
 
+        # ── Auto-trigger: detect market change ──────────────────────
+        _current_market_key = f"{selected_state_fips}_{selected_county_fips}"
+        _market_changed = st.session_state.get("last_market_key") != _current_market_key
+        if _market_changed:
+            st.session_state["last_market_key"] = _current_market_key
+            # Clear stale results so pipeline re-runs for new market
+            for _k in ["results", "model_results", "ensemble", "origins_df",
+                        "stores_df", "market_label", "bbox", "data_sources",
+                        "demo_summary", "bls_county", "bls_retail",
+                        "dist_matrix", "psycho_df", "psycho_summary"]:
+                st.session_state.pop(_k, None)
+
         st.divider()
         run_btn = st.button("Run Analysis", type="primary", use_container_width=True)
 
@@ -1373,8 +1606,9 @@ def main():
     market_label = f"{county_name}, {state_info.get('abbr', state_fips)}"
 
     # ── Run analysis ─────────────────────────────────────────────────────
-    if run_btn or "results" in st.session_state:
-        if run_btn:
+    _should_run = run_btn or _market_changed
+    if _should_run or "results" in st.session_state:
+        if _should_run and "results" not in st.session_state:
             status_container = st.container()
             with status_container:
                 with st.status(f"Analyzing {market_label}...", expanded=True) as status:
@@ -1655,10 +1889,207 @@ def main():
             active_results["hhi"], _ov_dom_seg, _ov_dom_pct, gap_df, viability,
         )
 
+        # Build insights report
+        psycho_summary_ov = st.session_state.get("psycho_summary")
+        bls_county_ov = st.session_state.get("bls_county", {})
+        bls_retail_ov = st.session_state.get("bls_retail", {})
+        insights_report = build_insights_report(
+            market_label, total_pop, total_hh, _safe_float(avg_income),
+            stores_df, store_results, active_results,
+            gap_df, viability, exec_summary,
+            psycho_df_ov, psycho_summary_ov,
+            bls_county_ov, bls_retail_ov,
+            origins_df, bbox, _rings_ov,
+        )
+
         # ── Tabs ─────────────────────────────────────────────────────────
-        tab_overview, tab_demo, tab_psycho, tab_competition, tab_scenario = st.tabs([
-            "Market Overview", "Demographics", "Psychographics", "Competition", "Scenario",
+        tab_insights, tab_overview, tab_demo, tab_psycho, tab_competition, tab_scenario = st.tabs([
+            "Insights", "Market Overview", "Demographics", "Psychographics", "Competition", "Scenario",
         ])
+
+        # ── Tab 0: Insights ───────────────────────────────────────────────
+        with tab_insights:
+            import plotly.express as px
+
+            # --- A. Market Grade Header ---
+            _grade_emoji = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🟠", "F": "🔴"}
+            _g = insights_report["grade"]
+            st.markdown(
+                f"## {_grade_emoji.get(_g, '')} Market Grade: {_g} &nbsp;&mdash;&nbsp; "
+                f"{insights_report['score']}/100",
+            )
+            st.markdown(f"**{insights_report['verdict']}**")
+            st.markdown(
+                f"{market_label} &nbsp;|&nbsp; Pop {total_pop:,} &nbsp;|&nbsp; "
+                f"{len(stores_df):,} stores &nbsp;|&nbsp; "
+                f"Median Income ${_safe_float(avg_income):,.0f}"
+            )
+
+            # Score breakdown
+            comps = insights_report.get("components", {})
+            if comps:
+                sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+                sc1.metric("Population", f"{comps.get('population', 0)}/20")
+                sc2.metric("Income Fit", f"{comps.get('income', 0)}/20")
+                sc3.metric("Competition", f"{comps.get('competition', 0)}/20")
+                sc4.metric("Category Fit", f"{comps.get('category_fit', 0)}/20")
+                sc5.metric("Market Health", f"{comps.get('market_health', 0)}/20")
+
+            st.divider()
+
+            # --- B. Executive Summary ---
+            st.subheader("Executive Summary")
+            st.info(exec_summary)
+
+            st.divider()
+
+            # --- C. Opportunity Scorecard ---
+            st.subheader("Opportunity Scorecard")
+            _underserved = insights_report.get("underserved", [])
+            if _underserved:
+                _us_cols = st.columns(min(len(_underserved), 3))
+                for i, gap in enumerate(_underserved[:3]):
+                    with _us_cols[i]:
+                        st.metric(gap["category"].title(), f"{gap.get('saturation', 0):.0%} saturated")
+                        st.caption(
+                            f"**{gap.get('actual_stores', 0)}** stores vs "
+                            f"**{gap.get('expected_stores', 0)}** expected\n\n"
+                            f"TAM: **${gap.get('tam', 0) / 1e6:,.1f}M**"
+                        )
+            else:
+                st.caption("No significantly underserved categories detected.")
+
+            _oversat = insights_report.get("oversaturated", [])
+            if _oversat:
+                cats = ", ".join(o["category"] for o in _oversat)
+                st.warning(f"Oversaturated categories: **{cats}** — avoid or differentiate heavily.")
+
+            st.divider()
+
+            # --- D. Consumer DNA ---
+            st.subheader("Consumer DNA")
+            _dna = insights_report.get("consumer_dna", [])
+            if _dna:
+                _dna_cols = st.columns(min(len(_dna), 3))
+                for i, seg in enumerate(_dna[:3]):
+                    with _dna_cols[i]:
+                        st.markdown(f"### {seg['name']}")
+                        st.markdown(f"**{seg['pct']:.0f}%** of population ({seg['population']:,})")
+                        pb = seg.get("playbook")
+                        if pb:
+                            st.markdown(f"_{pb.get('description', '')}_")
+                            st.markdown(f"**Price sensitivity**: {pb.get('price_sensitivity', 'N/A')}")
+                            st.markdown(f"**Channel**: {pb.get('channel_preference', 'N/A')}")
+                            st.markdown(f"**Frequency**: {pb.get('shopping_frequency', 'N/A')}")
+                            affs = pb.get("retail_affinity", [])
+                            if affs:
+                                st.markdown(f"**Retail affinity**: {', '.join(affs)}")
+                            st.markdown(f"**Messaging**: {pb.get('messaging', '')}")
+                            st.markdown(f"**Promo cadence**: {pb.get('promo_cadence', '')}")
+                            st.markdown(f"**Loyalty**: {pb.get('loyalty_strategy', '')}")
+
+                # Segment share chart
+                if len(_dna) > 0 and psycho_summary_ov is not None and not psycho_summary_ov.empty:
+                    ps_chart = psycho_summary_ov.copy()
+                    if "segment_name" in ps_chart.columns and "population" in ps_chart.columns:
+                        ps_chart = ps_chart.sort_values("population", ascending=True)
+                        fig_seg = px.bar(ps_chart, x="population", y="segment_name",
+                                         orientation="h", title="Segment Distribution by Population")
+                        fig_seg.update_layout(height=300, yaxis_title=None,
+                                              xaxis_title="Population", margin=dict(l=0, r=20, t=40, b=20))
+                        st.plotly_chart(fig_seg, use_container_width=True)
+            else:
+                st.caption("Psychographic data not available.")
+
+            st.divider()
+
+            # --- E. Revenue Potential ---
+            st.subheader("Revenue Potential by Category")
+            _rev_pot = insights_report.get("revenue_potential", [])
+            if _rev_pot:
+                rev_df = pd.DataFrame(_rev_pot)
+                rev_display = rev_df[["category", "status", "actual_stores", "saturation",
+                                       "tam", "est_new_entrant_rev", "supportable_rent_mid",
+                                       "market_avg_rent"]].copy()
+                rev_display.columns = ["Category", "Status", "Stores", "Saturation",
+                                        "TAM ($)", "Est. New Entrant Rev ($)",
+                                        "Supportable Rent ($/sqft)", "Market Avg Rent ($/sqft)"]
+                rev_display["TAM ($)"] = rev_display["TAM ($)"].apply(lambda x: f"${x:,.0f}")
+                rev_display["Est. New Entrant Rev ($)"] = rev_display["Est. New Entrant Rev ($)"].apply(lambda x: f"${x:,.0f}")
+                rev_display["Supportable Rent ($/sqft)"] = rev_display["Supportable Rent ($/sqft)"].apply(lambda x: f"${x:,.2f}")
+                rev_display["Market Avg Rent ($/sqft)"] = rev_display["Market Avg Rent ($/sqft)"].apply(lambda x: f"${x:,.2f}")
+                rev_display["Saturation"] = rev_display["Saturation"].apply(lambda x: f"{x:.0%}" if isinstance(x, (int, float)) else x)
+                st.dataframe(rev_display, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # --- F. Competitive Landscape ---
+            st.subheader("Competitive Landscape")
+            _comp = insights_report.get("competition", {})
+            cl1, cl2, cl3 = st.columns(3)
+            cl1.metric("Concentration (HHI)", f"{_comp.get('hhi', 0):.0f}")
+            cl2.metric("Competition Level", _comp.get("level", "N/A"))
+            cl3.metric("Top 5 Share", f"{_comp.get('top5_share', 0):.1%}")
+            st.caption(_comp.get("description", ""))
+
+            _top5 = _comp.get("top5_stores", [])
+            if _top5:
+                t5_col1, t5_col2 = st.columns(2)
+                with t5_col1:
+                    st.markdown("**Top 5 Stores by Market Share**")
+                    for i, s in enumerate(_top5, 1):
+                        st.markdown(f"{i}. **{s['name']}** ({s['category']}) — {s['share']:.2%}")
+
+                with t5_col2:
+                    _cat_mix = _comp.get("category_mix", {})
+                    if _cat_mix:
+                        st.markdown("**Category Mix**")
+                        for cat, cnt in _cat_mix.items():
+                            st.markdown(f"- {cat}: {cnt} stores")
+
+            st.divider()
+
+            # --- G. Actionable Recommendations ---
+            st.subheader("Actionable Recommendations")
+            _recs = insights_report.get("recommendations", [])
+            for i, rec in enumerate(_recs, 1):
+                st.markdown(f"**{i}. {rec['title']}**")
+                st.markdown(f"  {rec['detail']}")
+                st.markdown("")
+
+            # --- H. Market at a Glance (collapsible) ---
+            with st.expander("Market at a Glance"):
+                _dr = insights_report.get("distance_rings", {})
+                if _dr:
+                    st.markdown("**Population by Distance from County Center**")
+                    dr_data = []
+                    for ring_key in ["1mi", "3mi", "5mi", "10mi"]:
+                        r = _dr.get(ring_key, {})
+                        dr_data.append({
+                            "Ring": ring_key,
+                            "Population": f"{r.get('population', 0):,}",
+                            "Households": f"{r.get('households', 0):,}",
+                            "Avg Income": f"${r.get('avg_income', 0):,.0f}" if r.get("avg_income", 0) > 0 else "N/A",
+                        })
+                    st.dataframe(pd.DataFrame(dr_data), use_container_width=True, hide_index=True)
+
+                _bls = insights_report.get("bls", {})
+                if _bls.get("total_employment", 0) > 0:
+                    st.markdown("**BLS Employment**")
+                    b1, b2, b3, b4 = st.columns(4)
+                    b1.metric("Total Employment", f"{_bls['total_employment']:,}")
+                    b2.metric("Avg Weekly Wage", f"${_bls['avg_weekly_wage']:,.0f}")
+                    b3.metric("Retail Employment", f"{_bls.get('retail_employment', 0):,}")
+                    b4.metric("Retail Wage", f"${_bls.get('retail_wage', 0):,.0f}")
+
+                _inc = insights_report.get("income_stats", {})
+                if _inc.get("median", 0) > 0:
+                    st.markdown("**Income Distribution**")
+                    i1, i2, i3, i4 = st.columns(4)
+                    i1.metric("Min", f"${_inc['min']:,.0f}")
+                    i2.metric("Median", f"${_inc['median']:,.0f}")
+                    i3.metric("Mean", f"${_inc['mean']:,.0f}")
+                    i4.metric("Max", f"${_inc['max']:,.0f}")
 
         # ── Tab 1: Market Overview ───────────────────────────────────────
         with tab_overview:
@@ -2730,7 +3161,7 @@ Divided by 365 (daily) or 52 (weekly).
 
         **Coverage:** All 50 states, 3,200+ counties, any ZIP code.
 
-        Select a state and county in the sidebar, then click **Run Analysis**.
+        Select a state and county in the sidebar — analysis runs automatically.
         """)
 
 
