@@ -1755,8 +1755,13 @@ def main():
 
         # ── Auto-trigger: detect market change ──────────────────────
         _current_market_key = f"{selected_state_fips}_{selected_county_fips}"
-        _market_changed = st.session_state.get("last_market_key") != _current_market_key
-        if _market_changed:
+        _market_changed = False
+        if "last_market_key" not in st.session_state:
+            # First load — just remember the key, don't auto-trigger
+            st.session_state["last_market_key"] = _current_market_key
+        elif st.session_state["last_market_key"] != _current_market_key:
+            # User changed state/county — auto-trigger
+            _market_changed = True
             st.session_state["last_market_key"] = _current_market_key
             # Clear stale results so pipeline re-runs for new market
             for _k in ["results", "model_results", "ensemble", "origins_df",
