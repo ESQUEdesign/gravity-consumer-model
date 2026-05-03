@@ -52,6 +52,32 @@ _RETAIL_NAICS = "44-45"
 _AGGREGATION_LEVEL_TOTAL = "70"  # county total, all industries
 _AGGREGATION_LEVEL_SECTOR = "74"  # 2-digit NAICS sector within county
 
+# NAICS 2-digit sector code → industry name (BLS QCEW API does NOT return titles)
+_NAICS_SECTOR_NAMES = {
+    "11": "Agriculture, Forestry, Fishing",
+    "21": "Mining, Quarrying, Oil & Gas",
+    "22": "Utilities",
+    "23": "Construction",
+    "31-33": "Manufacturing",
+    "42": "Wholesale Trade",
+    "44-45": "Retail Trade",
+    "48-49": "Transportation & Warehousing",
+    "51": "Information",
+    "52": "Finance & Insurance",
+    "53": "Real Estate",
+    "54": "Professional & Technical Services",
+    "55": "Management of Companies",
+    "56": "Administrative & Waste Services",
+    "61": "Educational Services",
+    "62": "Health Care & Social Assistance",
+    "71": "Arts, Entertainment & Recreation",
+    "72": "Accommodation & Food Services",
+    "81": "Other Services",
+    "92": "Public Administration",
+    "10": "Total, All Industries",
+    "99": "Unclassified",
+}
+
 
 # ---------------------------------------------------------------------------
 # Main class
@@ -261,7 +287,9 @@ class BLSLoader:
                 row.get("annual_avg_emplvl", row.get("annual_avg_emplvl ", 0))
             )
             result["avg_weekly_wage"] = self._safe_float(
-                row.get("avg_wkly_wage", row.get("avg_wkly_wage ", 0.0))
+                row.get("annual_avg_wkly_wage",
+                         row.get("avg_wkly_wage",
+                                  row.get("avg_wkly_wage ", 0.0)))
             )
             result["total_establishments"] = self._safe_int(
                 row.get("annual_avg_estabs", row.get("annual_avg_estabs ", 0))
@@ -302,7 +330,8 @@ class BLSLoader:
                     None,
                 )
                 wage_col = next(
-                    (c for c in ("avg_wkly_wage", "avg_wkly_wage ")
+                    (c for c in ("annual_avg_wkly_wage", "avg_wkly_wage",
+                                 "avg_wkly_wage ")
                      if c in sector_df.columns),
                     None,
                 )
@@ -314,9 +343,16 @@ class BLSLoader:
 
                 breakdown = []
                 for _, srow in sector_df.head(10).iterrows():
+                    ind_code = str(srow[code_col]).strip() if code_col else ""
+                    # Use title column if available, otherwise look up NAICS code
+                    if title_col and pd.notna(srow.get(title_col)):
+                        ind_title = str(srow[title_col]).strip()
+                    else:
+                        ind_title = _NAICS_SECTOR_NAMES.get(
+                            ind_code, f"NAICS {ind_code}")
                     entry = {
-                        "industry_code": str(srow[code_col]).strip() if code_col else "",
-                        "industry_title": str(srow[title_col]).strip() if title_col else "",
+                        "industry_code": ind_code,
+                        "industry_title": ind_title,
                         "employment": self._safe_int(srow.get(empl_col, 0)),
                         "avg_weekly_wage": self._safe_float(
                             srow[wage_col] if wage_col else 0.0
@@ -404,7 +440,8 @@ class BLSLoader:
             None,
         )
         wage_col = next(
-            (c for c in ("avg_wkly_wage", "avg_wkly_wage ")
+            (c for c in ("annual_avg_wkly_wage", "avg_wkly_wage",
+                         "avg_wkly_wage ")
              if c in df.columns),
             None,
         )
