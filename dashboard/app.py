@@ -643,6 +643,158 @@ _PRICE_SENS_MULT = {
 # Visit frequency multiplier
 _FREQ_MULT = {"high": 1.20, "moderate": 1.00, "low": 0.80}
 
+# Average basket size by category (BLS + industry benchmarks)
+_AVG_BASKET = {
+    "grocery": 42, "convenience": 12, "department": 65,
+    "apparel": 58, "electronics": 95, "furniture": 180,
+    "hardware": 48, "food_specialty": 25, "general": 35,
+    "variety": 18, "liquor": 32, "beverages": 15, "mall": 72,
+    "new": 35,
+}
+
+# Distance rings in miles
+_DISTANCE_RINGS_MI = [1, 3, 5, 10]
+
+# Category keywords for affinity matching
+_CATEGORY_AFFINITY_MAP = {
+    "grocery": ["grocery", "grocery chains", "organic", "ethnic grocery", "specialty food"],
+    "convenience": ["convenience"],
+    "department": ["department", "big-box", "Target"],
+    "apparel": ["apparel", "fast fashion", "mid-tier apparel", "family apparel",
+                 "athleisure", "discount apparel"],
+    "electronics": ["electronics"],
+    "furniture": ["furniture", "home furnishing"],
+    "hardware": ["hardware", "home improvement", "home maintenance"],
+    "food_specialty": ["specialty food", "organic", "ethnic grocery"],
+    "general": ["general", "big-box", "Walmart", "Target"],
+    "variety": ["variety", "dollar stores", "discount"],
+    "liquor": ["liquor", "wine/spirits"],
+    "mall": ["mall", "premium", "specialty"],
+}
+
+
+def _compute_distance_rings(lat, lon, origins_df):
+    """Compute population within distance rings from a point."""
+    km_per_mile = 1.60934
+    dists = origins_df.apply(
+        lambda r: _haversine_km(lat, lon, r["lat"], r["lon"]), axis=1
+    )
+    rings = {}
+    for mi in _DISTANCE_RINGS_MI:
+        mask = dists <= (mi * km_per_mile)
+        rings[f"{mi}mi"] = {
+            "population": int(origins_df.loc[mask, "population"].sum()),
+            "households": int(origins_df.loc[mask, "households"].sum()) if "households" in origins_df.columns else 0,
+            "block_groups": int(mask.sum()),
+            "avg_income": float(origins_df.loc[mask & (origins_df["median_income"] > 0), "median_income"].mean()) if mask.any() else 0,
+        }
+    return rings
+
+
+def _nearest_competitors(new_lat, new_lon, stores_df, store_results, n=10):
+    """Find n nearest existing stores with distance, share, and attributes."""
+    dists = stores_df.apply(
+        lambda r: _haversine_km(new_lat, new_lon, r["lat"], r["lon"]), axis=1
+    )
+    nearest_idx = dists.nsmallest(n).index
+    result = pd.DataFrame({
+        "name": stores_df.loc[nearest_idx, "name"],
+        "category": stores_df.loc[nearest_idx, "category"],
+        "distance_km": dists.loc[nearest_idx],
+        "distance_mi": dists.loc[nearest_idx] / 1.60934,
+    })
+    if "square_footage" in stores_df.columns:
+        result["sqft"] = stores_df.loc[nearest_idx, "square_footage"]
+    if "avg_rating" in stores_df.columns:
+        result["rating"] = stores_df.loc[nearest_idx, "avg_rating"]
+    if store_results is not None:
+        result["share"] = store_results.loc[
+            store_results.index.isin(nearest_idx), "share"
+        ].reindex(nearest_idx)
+    return result.sort_values("distance_km")
+
+
+def _category_fit_score(category, psycho_df, origins_df, new_store_probs):
+    """Score 0-100 how well the catchment psychographic profile matches
+    the store category via retail_affinity overlap."""
+    if not _PSYCHO_OK or psycho_df is None or psycho_df.empty:
+        return None, None
+    cat_keywords = _CATEGORY_AFFINITY_MAP.get(category, [])
+    if not cat_keywords:
+        return None, None
+    probs = new_store_probs.reindex(origins_df.index).fillna(0)
+    aligned = psycho_df.reindex(origins_df.index).dropna(subset=["segment_code"])
+    if aligned.empty:
+        return None, None
+    weighted_score = 0.0
+    total_weight = 0.0
+    matching_segs = []
+    for idx in aligned.index:
+        w = probs.get(idx, 0)
+        if w <= 0:
+            continue
+        code = aligned.loc[idx, "segment_code"]
+        if code in SEGMENT_PROFILES:
+            affinities = SEGMENT_PROFILES[code].get("consumer_behavior", {}).get("retail_affinity", [])
+            overlap = len(set(a.lower() for a in affinities) & set(k.lower() for k in cat_keywords))
+            seg_score = min(overlap / max(len(cat_keywords), 1), 1.0)
+            weighted_score += seg_score * w
+            total_weight += w
+            if overlap > 0 and SEGMENT_PROFILES[code]["name"] not in matching_segs:
+                matching_segs.append(SEGMENT_PROFILES[code]["name"])
+    fit = (weighted_score / total_weight * 100) if total_weight > 0 else 0
+    return round(fit, 1), matching_segs
+
+
+def _generate_insight_narrative(category, new_name, rev, rings, fit_score,
+                                fit_segments, dom_segment, dom_pct,
+                                cannib_stores, avg_income, price_level):
+    """Generate a 3-5 sentence consumer insight summary."""
+    lines = []
+    # Location population context
+    pop_3mi = rings.get("3mi", {}).get("population", 0) if rings else 0
+    pop_5mi = rings.get("5mi", {}).get("population", 0) if rings else 0
+    lines.append(
+        f"**{new_name}** serves a catchment of {pop_3mi:,} people within 3 miles "
+        f"and {pop_5mi:,} within 5 miles."
+    )
+    # Dominant segment
+    if dom_segment and dom_pct:
+        lines.append(
+            f"The primary consumer segment is **{dom_segment}** ({dom_pct:.0f}% of catchment)."
+        )
+    # Category fit
+    if fit_score is not None:
+        if fit_score >= 70:
+            lines.append(f"Category-audience fit is **strong** ({fit_score:.0f}/100) — "
+                         f"catchment segments align well with {category} retail.")
+        elif fit_score >= 40:
+            lines.append(f"Category-audience fit is **moderate** ({fit_score:.0f}/100) — "
+                         f"partial alignment with {category} retail preferences.")
+        else:
+            lines.append(f"Category-audience fit is **weak** ({fit_score:.0f}/100) — "
+                         f"consider whether {category} matches this audience.")
+    # Income vs price level
+    if avg_income > 0:
+        price_desc = {"budget": "budget-conscious", "moderate": "moderate-income",
+                      "premium": "higher-income", "luxury": "affluent"}
+        ideal = price_desc.get(price_level, "moderate-income")
+        if price_level in ("premium", "luxury") and avg_income < 60_000:
+            lines.append(f"Average catchment income (${avg_income:,.0f}) may be low for "
+                         f"a {price_level} positioning — consider adjusting price strategy.")
+        elif price_level == "budget" and avg_income > 100_000:
+            lines.append(f"Catchment income (${avg_income:,.0f}) is high — there may be "
+                         f"room for a premium positioning instead of budget.")
+        else:
+            lines.append(f"Average catchment income (${avg_income:,.0f}) supports "
+                         f"the {price_level} price positioning.")
+    # Cannibalization
+    if cannib_stores and len(cannib_stores) > 0:
+        names = ", ".join(cannib_stores[:3])
+        lines.append(f"**Cannibalization risk**: {len(cannib_stores)} same-category "
+                     f"competitor(s) within 2 km ({names}).")
+    return " ".join(lines)
+
 
 def predict_revenue(origins_df, new_store_probs, category, psycho_df=None):
     """Predict annual revenue for a new store based on gravity model
@@ -1741,7 +1893,62 @@ def main():
                         rating=new_rating, price_level=new_price,
                     )
 
-                # -- Key metrics --
+                import plotly.express as px
+                import plotly.graph_objects as go
+
+                new_probs = scenario.get("new_store_probs")
+                rev = scenario.get("revenue")
+                psycho_df_sc = st.session_state.get("psycho_df")
+
+                # ── 1. CONSUMER INSIGHT NARRATIVE ─────────────────────
+                # Pre-compute values used by narrative and later sections
+                rings = _compute_distance_rings(new_lat, new_lon, origins_df)
+
+                # Dominant segment
+                dom_segment, dom_pct = None, None
+                if _PSYCHO_OK and psycho_df_sc is not None and new_probs is not None:
+                    prob_al = new_probs.reindex(origins_df.index).fillna(0)
+                    al_ps = psycho_df_sc.reindex(origins_df.index).dropna(subset=["segment_name"])
+                    if not al_ps.empty:
+                        al_ps["w"] = prob_al.reindex(al_ps.index).fillna(0)
+                        sw = al_ps.groupby("segment_name")["w"].sum()
+                        if sw.sum() > 0:
+                            dom_segment = sw.idxmax()
+                            dom_pct = sw.max() / sw.sum() * 100
+
+                # Category fit
+                fit_score, fit_segments = None, None
+                if new_probs is not None:
+                    fit_score, fit_segments = _category_fit_score(
+                        new_category, psycho_df_sc, origins_df, new_probs)
+
+                # Cannibalization: same-category within 2km
+                cannib_stores = []
+                same_cat = stores_df[stores_df["category"] == new_category]
+                if not same_cat.empty:
+                    dists_c = same_cat.apply(
+                        lambda r: _haversine_km(new_lat, new_lon, r["lat"], r["lon"]), axis=1)
+                    near = dists_c[dists_c <= 2.0]
+                    cannib_stores = same_cat.loc[near.index, "name"].tolist()
+
+                # Weighted income for narrative
+                w_income = 0.0
+                if new_probs is not None:
+                    prob_al2 = new_probs.reindex(origins_df.index).fillna(0)
+                    tc = prob_al2[prob_al2 > 0]
+                    if tc.sum() > 0:
+                        w_income = float(
+                            (origins_df.loc[tc.index, "median_income"] * tc).sum() / tc.sum()
+                        )
+
+                narrative = _generate_insight_narrative(
+                    new_category, new_name, rev, rings, fit_score,
+                    fit_segments, dom_segment, dom_pct,
+                    cannib_stores, w_income, new_price,
+                )
+                st.info(narrative)
+
+                # ── 2. KEY METRICS ROW ────────────────────────────────
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("New Store Share", _sf(scenario['new_store_share'], '.4%'))
                 c2.metric("New Store Demand", _sf(scenario['new_store_demand'], ',.0f'))
@@ -1749,36 +1956,37 @@ def main():
                            delta=_sf(_safe_float(scenario['hhi_scenario']) - _safe_float(scenario['hhi_baseline']), '+.1f'))
                 c4.metric("Baseline HHI", _sf(scenario['hhi_baseline'], '.1f'))
 
-                # -- Revenue prediction --
-                rev = scenario.get("revenue")
+                # ── 3. CUSTOMER VOLUME + REVENUE FORECAST ─────────────
+                st.divider()
                 if rev:
-                    st.divider()
-                    st.subheader("Revenue Forecast")
-                    st.caption(
-                        "Based on gravity model catchment, local income levels, "
-                        "and psychographic spending propensity"
-                    )
-                    r1, r2, r3, r4 = st.columns(4)
-                    r1.metric("Annual Revenue (est.)",
-                              f"${rev['annual_revenue']:,.0f}")
-                    r2.metric("Monthly Revenue (est.)",
-                              f"${rev['monthly_revenue']:,.0f}")
-                    if rev.get("revenue_per_sqft"):
-                        r3.metric("Revenue / Sq Ft",
-                                  f"${rev['revenue_per_sqft']:,.0f}")
-                    else:
-                        r3.metric("Revenue / Sq Ft", "N/A")
-                    r4.metric("Confidence Range",
+                    basket = _AVG_BASKET.get(new_category, 35)
+                    annual_rev = rev["annual_revenue"]
+                    annual_txns = annual_rev / basket if basket > 0 else 0
+                    daily_customers = annual_txns / 365
+                    weekly_customers = annual_txns / 52
+
+                    st.subheader("Revenue & Customer Volume Forecast")
+                    r1, r2, r3, r4, r5 = st.columns(5)
+                    r1.metric("Annual Revenue", f"${annual_rev:,.0f}")
+                    r2.metric("Monthly Revenue", f"${rev['monthly_revenue']:,.0f}")
+                    r3.metric("Revenue / Sq Ft",
+                              f"${rev.get('revenue_per_sqft', 0):,.0f}" if rev.get("revenue_per_sqft") else "N/A")
+                    r4.metric("Daily Customers", f"{daily_customers:,.0f}")
+                    r5.metric("Weekly Customers", f"{weekly_customers:,.0f}")
+
+                    v1, v2, v3 = st.columns(3)
+                    v1.metric("Avg Basket Size", f"${basket:,.0f}")
+                    v2.metric("Annual Transactions", f"{annual_txns:,.0f}")
+                    v3.metric("Confidence Range",
                               f"${rev['confidence_low']:,.0f} – ${rev['confidence_high']:,.0f}")
 
-                    # Revenue by segment breakdown
-                    import plotly.express as px
+                    # Revenue by segment
                     rev_seg = rev.get("revenue_by_segment")
                     if rev_seg is not None and not rev_seg.empty:
                         col_rev, col_pie = st.columns(2)
                         with col_rev:
-                            rev_seg_sorted = rev_seg.sort_values("revenue", ascending=True)
-                            fig_rev = px.bar(rev_seg_sorted, x="revenue", y="segment",
+                            rss = rev_seg.sort_values("revenue", ascending=True)
+                            fig_rev = px.bar(rss, x="revenue", y="segment",
                                              orientation="h", color="revenue",
                                              color_continuous_scale="Greens",
                                              title="Revenue by Consumer Segment")
@@ -1787,7 +1995,6 @@ def main():
                                                   yaxis_title=None,
                                                   margin=dict(l=0, r=20, t=40, b=20))
                             st.plotly_chart(fig_rev, use_container_width=True)
-
                         with col_pie:
                             fig_pie = px.pie(rev_seg, values="revenue", names="segment",
                                              title="Revenue Share by Segment", hole=0.4)
@@ -1795,23 +2002,193 @@ def main():
                                                   margin=dict(l=20, r=20, t=40, b=20))
                             st.plotly_chart(fig_pie, use_container_width=True)
 
-                    # Revenue drivers explanation
-                    with st.expander("Revenue Model Details"):
-                        st.markdown(f"""
-**Model inputs:**
-- **Category baseline**: ${_CATEGORY_SPEND.get(new_category, 2000):,}/year per capita ({new_category})
-- **Income adjustment**: local median income vs. national (${_NATIONAL_MEDIAN_INCOME:,}), elasticity {_INCOME_ELASTICITY}
-- **Psychographic multiplier**: spending propensity × visit frequency by lifestyle segment
-- **Gravity probability**: Huff model P(choose this store) per block group
-
-**Confidence range**: 70%–135% of point estimate to account for model uncertainty,
-local competitive dynamics, and seasonal variation.
-                        """)
-
+                # ── 4. CATEGORY FIT + COMPARABLE BENCHMARKING ─────────
                 st.divider()
-                import plotly.express as px
+                col_fit, col_bench = st.columns(2)
 
-                # -- Impact by store + impact by category --
+                with col_fit:
+                    st.subheader("Category-Audience Fit")
+                    if fit_score is not None:
+                        # Gauge-style display
+                        color = "#4CAF50" if fit_score >= 70 else "#FF9800" if fit_score >= 40 else "#F44336"
+                        st.metric("Fit Score", f"{fit_score}/100")
+                        st.progress(min(fit_score / 100, 1.0))
+                        if fit_segments:
+                            st.caption(f"Matching segments: {', '.join(fit_segments[:5])}")
+                    else:
+                        st.caption("Fit score unavailable (psychographic data required)")
+
+                with col_bench:
+                    st.subheader("Comparable Store Benchmark")
+                    same_cat_stores = stores_df[stores_df["category"] == new_category]
+                    if not same_cat_stores.empty and store_results is not None:
+                        same_cat_results = store_results.loc[
+                            store_results.index.isin(same_cat_stores.index)]
+                        if not same_cat_results.empty:
+                            avg_share = same_cat_results["share"].mean()
+                            avg_demand = same_cat_results["demand"].mean()
+                            avg_sqft = same_cat_stores["square_footage"].mean() if "square_footage" in same_cat_stores.columns else 0
+                            n_comp = len(same_cat_results)
+                            my_share = scenario["new_store_share"]
+                            share_vs = ((my_share - avg_share) / avg_share * 100) if avg_share > 0 else 0
+
+                            b1, b2 = st.columns(2)
+                            b1.metric(f"Avg {new_category} Share", _sf(avg_share, '.4%'),
+                                      delta=f"{share_vs:+.1f}% vs avg")
+                            b2.metric(f"Avg {new_category} Sq Ft",
+                                      f"{avg_sqft:,.0f}" if avg_sqft > 0 else "N/A")
+                            st.caption(f"Based on {n_comp} {new_category} stores in market")
+                            if rev and avg_sqft > 0:
+                                mkt_rev_sqft = avg_demand * _CATEGORY_SPEND.get(new_category, 2000) / avg_sqft if avg_sqft > 0 else 0
+                                my_rev_sqft = rev.get("revenue_per_sqft", 0)
+                                st.metric("Your $/sqft vs market avg",
+                                          f"${my_rev_sqft:,.0f}",
+                                          delta=f"${my_rev_sqft - mkt_rev_sqft:+,.0f}")
+                        else:
+                            st.caption(f"No {new_category} stores in current results")
+                    else:
+                        st.caption(f"No {new_category} stores in market for comparison")
+
+                # ── 5. CANNIBALIZATION WARNING ─────────────────────────
+                if cannib_stores:
+                    st.divider()
+                    st.subheader("Cannibalization Risk")
+                    idf = scenario["impact_df"]
+                    cannib_detail = idf[idf["name"].isin(cannib_stores)].copy()
+                    if not cannib_detail.empty:
+                        cannib_detail["distance_km"] = cannib_detail.apply(
+                            lambda r: _haversine_km(new_lat, new_lon,
+                                                    stores_df.loc[r.name, "lat"],
+                                                    stores_df.loc[r.name, "lon"])
+                            if r.name in stores_df.index else 0, axis=1)
+                        disp_cols = ["name", "distance_km", "baseline_share",
+                                     "scenario_share", "change"]
+                        cd_disp = cannib_detail[disp_cols].copy()
+                        cd_disp["distance_km"] = cd_disp["distance_km"].apply(lambda x: f"{x:.1f}")
+                        cd_disp["baseline_share"] = cd_disp["baseline_share"].apply(lambda x: _sf(x, '.4%'))
+                        cd_disp["scenario_share"] = cd_disp["scenario_share"].apply(lambda x: _sf(x, '.4%'))
+                        cd_disp["change"] = cd_disp["change"].apply(lambda x: _sf(x, '.4%'))
+                        cd_disp = cd_disp.rename(columns={
+                            "name": "Store", "distance_km": "Dist (km)",
+                            "baseline_share": "Before", "scenario_share": "After",
+                            "change": "Impact",
+                        })
+                        st.dataframe(cd_disp, use_container_width=True, hide_index=True)
+                    else:
+                        for s in cannib_stores[:5]:
+                            st.warning(f"{s} — within 2 km, same category")
+
+                # ── 6. DISTANCE RING ANALYSIS ─────────────────────────
+                st.divider()
+                st.subheader("Distance Ring Analysis")
+                ring_cols = st.columns(len(_DISTANCE_RINGS_MI))
+                for i, mi in enumerate(_DISTANCE_RINGS_MI):
+                    key = f"{mi}mi"
+                    rd = rings.get(key, {})
+                    with ring_cols[i]:
+                        st.metric(f"{mi}-Mile Ring", f"{rd.get('population', 0):,}")
+                        st.caption(f"{rd.get('households', 0):,} HH")
+                        inc = rd.get("avg_income", 0)
+                        if inc > 0:
+                            st.caption(f"${inc:,.0f} avg income")
+
+                # Ring chart
+                ring_pops = [rings.get(f"{mi}mi", {}).get("population", 0) for mi in _DISTANCE_RINGS_MI]
+                incremental = [ring_pops[0]]
+                for j in range(1, len(ring_pops)):
+                    incremental.append(max(ring_pops[j] - ring_pops[j - 1], 0))
+                ring_chart = pd.DataFrame({
+                    "ring": [f"{mi} mi" for mi in _DISTANCE_RINGS_MI],
+                    "cumulative": ring_pops,
+                    "incremental": incremental,
+                })
+                fig_ring = px.bar(ring_chart, x="ring", y=["incremental"],
+                                  title="Population by Distance Ring",
+                                  labels={"value": "Population", "ring": "Distance"})
+                fig_ring.update_layout(height=300, showlegend=False,
+                                       margin=dict(l=0, r=20, t=40, b=20))
+                st.plotly_chart(fig_ring, use_container_width=True)
+
+                # ── 7. NEAREST COMPETITORS TABLE ──────────────────────
+                st.divider()
+                st.subheader("Nearest Competitors")
+                comp_df = _nearest_competitors(new_lat, new_lon, stores_df, store_results, n=10)
+                comp_disp = comp_df.copy()
+                comp_disp["distance_mi"] = comp_disp["distance_mi"].apply(lambda x: f"{x:.1f}")
+                comp_disp["distance_km"] = comp_disp["distance_km"].apply(lambda x: f"{x:.1f}")
+                if "share" in comp_disp.columns:
+                    comp_disp["share"] = comp_disp["share"].apply(lambda x: _sf(x, '.4%') if pd.notna(x) else "-")
+                if "sqft" in comp_disp.columns:
+                    comp_disp["sqft"] = comp_disp["sqft"].apply(lambda x: f"{x:,.0f}" if _safe_float(x) > 0 else "-")
+                if "rating" in comp_disp.columns:
+                    comp_disp["rating"] = comp_disp["rating"].apply(lambda x: f"{x:.1f}" if _safe_float(x) > 0 else "-")
+                rename_map = {"name": "Store", "category": "Category",
+                              "distance_mi": "Dist (mi)", "distance_km": "Dist (km)",
+                              "sqft": "Sq Ft", "rating": "Rating", "share": "Share"}
+                comp_disp = comp_disp.rename(columns=rename_map)
+                st.dataframe(comp_disp, use_container_width=True, hide_index=True, height=390)
+
+                # ── 8. SCENARIO MAP ───────────────────────────────────
+                st.divider()
+                st.subheader("Scenario Map")
+                try:
+                    import folium
+                    from streamlit_folium import st_folium
+
+                    sc_map = folium.Map(location=[new_lat, new_lon], zoom_start=13,
+                                        tiles="CartoDB positron")
+
+                    # New store pin (star)
+                    folium.Marker(
+                        location=[new_lat, new_lon],
+                        popup=f"<b>{new_name}</b><br>{new_category}<br>{new_sqft:,} sqft",
+                        icon=folium.Icon(color="green", icon="star", prefix="fa"),
+                    ).add_to(sc_map)
+
+                    # Existing stores (small circles)
+                    for sid, row in stores_df.iterrows():
+                        d = _haversine_km(new_lat, new_lon, row["lat"], row["lon"])
+                        if d <= 15:
+                            clr = "red" if row["category"] == new_category else "blue"
+                            folium.CircleMarker(
+                                location=[row["lat"], row["lon"]], radius=4,
+                                color=clr, fill=True, fill_color=clr, fill_opacity=0.6,
+                                popup=f"<b>{row['name']}</b><br>{row['category']}<br>{d:.1f} km",
+                            ).add_to(sc_map)
+
+                    # Catchment heatmap from probability
+                    if new_probs is not None:
+                        heat_data = []
+                        probs_al = new_probs.reindex(origins_df.index).fillna(0)
+                        for idx in probs_al[probs_al > 0.005].index:
+                            if idx in origins_df.index:
+                                heat_data.append([
+                                    origins_df.loc[idx, "lat"],
+                                    origins_df.loc[idx, "lon"],
+                                    float(probs_al.loc[idx]),
+                                ])
+                        if heat_data:
+                            from folium.plugins import HeatMap
+                            HeatMap(heat_data, radius=18, blur=15,
+                                    max_zoom=13, min_opacity=0.3).add_to(sc_map)
+
+                    # Distance rings (circles)
+                    for mi in [1, 3, 5]:
+                        folium.Circle(
+                            location=[new_lat, new_lon],
+                            radius=mi * 1609.34,
+                            color="gray", weight=1, fill=False,
+                            dash_array="5",
+                            popup=f"{mi}-mile ring",
+                        ).add_to(sc_map)
+
+                    st_folium(sc_map, width=None, height=500, returned_objects=[])
+                except Exception:
+                    st.caption("Map unavailable (folium/streamlit-folium required)")
+
+                # ── 9. COMPETITIVE IMPACT CHARTS ──────────────────────
+                st.divider()
+                st.subheader("Competitive Impact")
                 col_impact, col_cat = st.columns(2)
 
                 with col_impact:
@@ -1829,85 +2206,127 @@ local competitive dynamics, and seasonal variation.
                 with col_cat:
                     idf = scenario["impact_df"]
                     cat_impact = idf.groupby("category")["change"].mean().sort_values()
-                    cat_df = pd.DataFrame({"category": cat_impact.index, "avg_share_change": cat_impact.values})
-                    fig2 = px.bar(cat_df, x="avg_share_change", y="category", orientation="h",
-                                  color="avg_share_change", color_continuous_scale="RdBu",
+                    cat_df = pd.DataFrame({"category": cat_impact.index,
+                                           "avg_share_change": cat_impact.values})
+                    fig2 = px.bar(cat_df, x="avg_share_change", y="category",
+                                  orientation="h", color="avg_share_change",
+                                  color_continuous_scale="RdBu",
                                   title="Impact by Category")
                     fig2.update_layout(height=450, coloraxis_showscale=False,
                                        xaxis_tickformat=".4%", yaxis_title=None,
                                        margin=dict(l=0, r=20, t=40, b=20))
                     st.plotly_chart(fig2, use_container_width=True)
 
-                # -- Catchment demographics & psychographics --
-                new_probs = scenario.get("new_store_probs")
+                # ── 10. CATCHMENT PROFILE + INCOME DISTRIBUTION ───────
                 if new_probs is not None and not new_probs.empty:
                     st.divider()
                     st.subheader("Catchment Profile")
-                    st.caption("Block groups weighted by probability of choosing this store")
 
-                    # Weight origins by choice probability
                     prob_aligned = new_probs.reindex(origins_df.index).fillna(0)
                     top_catchment = prob_aligned[prob_aligned > 0].sort_values(ascending=False)
                     n_bg = (top_catchment > 0.01).sum()
                     catch_pop = origins_df.loc[top_catchment.index, "population"]
                     weighted_pop = (catch_pop * top_catchment).sum()
-                    catch_income = origins_df.loc[top_catchment.index, "median_income"]
-                    weighted_income = (catch_income * top_catchment).sum() / top_catchment.sum() if top_catchment.sum() > 0 else 0
 
                     m1, m2, m3 = st.columns(3)
                     m1.metric("Catchment Block Groups", f"{n_bg:,}")
                     m2.metric("Weighted Population", f"{weighted_pop:,.0f}")
-                    m3.metric("Avg Income (weighted)", f"${weighted_income:,.0f}")
+                    m3.metric("Avg Income (weighted)", f"${w_income:,.0f}")
 
-                    # Psychographic breakdown of catchment
-                    psycho_df = st.session_state.get("psycho_df")
-                    if _PSYCHO_OK and psycho_df is not None and not psycho_df.empty:
-                        catch_psycho = psycho_df.reindex(top_catchment.index).dropna(subset=["segment_name"])
-                        if not catch_psycho.empty:
-                            catch_psycho["weight"] = top_catchment.reindex(catch_psycho.index).fillna(0)
-                            seg_weights = catch_psycho.groupby("segment_name")["weight"].sum()
-                            seg_pct = (seg_weights / seg_weights.sum() * 100).sort_values(ascending=False)
+                    # Income distribution histogram
+                    col_hist, col_seg = st.columns(2)
+                    with col_hist:
+                        catch_incomes = origins_df.loc[
+                            top_catchment.index, "median_income"
+                        ].dropna()
+                        catch_incomes = catch_incomes[catch_incomes > 0]
+                        if not catch_incomes.empty:
+                            fig_hist = px.histogram(
+                                catch_incomes, nbins=20,
+                                title="Catchment Income Distribution",
+                                labels={"value": "Median Income", "count": "Block Groups"},
+                            )
+                            # Price level overlay line
+                            price_lines = {"budget": 35000, "moderate": 60000,
+                                           "premium": 90000, "luxury": 130000}
+                            pl_val = price_lines.get(new_price, 60000)
+                            fig_hist.add_vline(x=pl_val, line_dash="dash",
+                                               line_color="red",
+                                               annotation_text=f"{new_price} target")
+                            fig_hist.update_layout(
+                                height=350, showlegend=False,
+                                xaxis_tickprefix="$", xaxis_tickformat=",.0f",
+                                margin=dict(l=0, r=20, t=40, b=20))
+                            st.plotly_chart(fig_hist, use_container_width=True)
 
-                            col_psycho, col_target = st.columns(2)
-                            with col_psycho:
-                                seg_chart = pd.DataFrame({"segment": seg_pct.index, "pct": seg_pct.values})
-                                fig3 = px.bar(seg_chart, x="pct", y="segment", orientation="h",
-                                              title="Catchment Lifestyle Segments",
+                    # Psychographic catchment breakdown
+                    with col_seg:
+                        if _PSYCHO_OK and psycho_df_sc is not None and not psycho_df_sc.empty:
+                            catch_psycho = psycho_df_sc.reindex(top_catchment.index).dropna(subset=["segment_name"])
+                            if not catch_psycho.empty:
+                                catch_psycho["weight"] = top_catchment.reindex(catch_psycho.index).fillna(0)
+                                sw = catch_psycho.groupby("segment_name")["weight"].sum()
+                                sp = (sw / sw.sum() * 100).sort_values(ascending=False)
+                                seg_chart = pd.DataFrame({"segment": sp.index, "pct": sp.values})
+                                fig3 = px.bar(seg_chart, x="pct", y="segment",
+                                              orientation="h", title="Catchment Lifestyle Segments",
                                               color="pct", color_continuous_scale="Viridis")
                                 fig3.update_layout(height=350, coloraxis_showscale=False,
                                                    xaxis_title="% of catchment", yaxis_title=None,
                                                    margin=dict(l=0, r=20, t=40, b=20))
                                 st.plotly_chart(fig3, use_container_width=True)
 
-                            with col_target:
-                                if target_segments:
-                                    target_pct = sum(seg_pct.get(s, 0) for s in target_segments)
-                                    st.metric("Target Audience Match", f"{target_pct:.1f}%")
-                                    target_demand = 0
-                                    name_to_code = {}
-                                    for code, prof in SEGMENT_PROFILES.items():
-                                        name_to_code[prof["name"]] = code
-                                    for seg_name in target_segments:
-                                        code = name_to_code.get(seg_name)
-                                        if code:
-                                            seg_mask = catch_psycho["segment_code"] == code
-                                            seg_bg = catch_psycho[seg_mask].index
-                                            seg_pop = origins_df.loc[seg_bg, "population"]
-                                            seg_prob = top_catchment.reindex(seg_bg).fillna(0)
-                                            target_demand += (seg_pop * seg_prob).sum()
-                                    st.metric("Target Segment Demand", f"{target_demand:,.0f}")
+                    # Target audience match
+                    if target_segments and _PSYCHO_OK and psycho_df_sc is not None:
+                        st.divider()
+                        st.subheader("Target Audience Analysis")
+                        catch_psycho = psycho_df_sc.reindex(top_catchment.index).dropna(subset=["segment_name"])
+                        if not catch_psycho.empty:
+                            catch_psycho["weight"] = top_catchment.reindex(catch_psycho.index).fillna(0)
+                            sw = catch_psycho.groupby("segment_name")["weight"].sum()
+                            sp = (sw / sw.sum() * 100)
+                            target_pct = sum(sp.get(s, 0) for s in target_segments)
 
-                                    # Show behavioral profile of target segments
-                                    for seg_name in target_segments:
-                                        code = name_to_code.get(seg_name)
-                                        if code and code in SEGMENT_PROFILES:
-                                            cb = SEGMENT_PROFILES[code].get("consumer_behavior", {})
-                                            st.markdown(f"**{seg_name}**")
-                                            st.text(f"  Retail affinity: {', '.join(cb.get('retail_affinity', []))}")
-                                            st.text(f"  Price sensitivity: {cb.get('price_sensitivity', 'N/A')}")
-                                            st.text(f"  Channel: {cb.get('channel_preference', 'N/A')}")
-                                else:
-                                    st.info("Select target audience segments above to see match analysis.")
+                            t1, t2 = st.columns(2)
+                            t1.metric("Target Audience Match", f"{target_pct:.1f}%")
+                            name_to_code = {p["name"]: c for c, p in SEGMENT_PROFILES.items()}
+                            target_demand = 0
+                            for seg_name in target_segments:
+                                code = name_to_code.get(seg_name)
+                                if code:
+                                    seg_mask = catch_psycho["segment_code"] == code
+                                    seg_bg = catch_psycho[seg_mask].index
+                                    seg_pop = origins_df.loc[seg_bg, "population"]
+                                    seg_prob = top_catchment.reindex(seg_bg).fillna(0)
+                                    target_demand += (seg_pop * seg_prob).sum()
+                            t2.metric("Target Segment Demand", f"{target_demand:,.0f}")
+
+                            for seg_name in target_segments:
+                                code = name_to_code.get(seg_name)
+                                if code and code in SEGMENT_PROFILES:
+                                    cb = SEGMENT_PROFILES[code].get("consumer_behavior", {})
+                                    st.markdown(f"**{seg_name}**")
+                                    st.text(f"  Retail affinity: {', '.join(cb.get('retail_affinity', []))}")
+                                    st.text(f"  Price sensitivity: {cb.get('price_sensitivity', 'N/A')}")
+                                    st.text(f"  Channel: {cb.get('channel_preference', 'N/A')}")
+
+                # ── Revenue model details (collapsed) ─────────────────
+                if rev:
+                    with st.expander("Revenue Model Details"):
+                        st.markdown(f"""
+**Model inputs:**
+- **Category baseline**: ${_CATEGORY_SPEND.get(new_category, 2000):,}/year per capita ({new_category})
+- **Avg basket size**: ${_AVG_BASKET.get(new_category, 35)} ({new_category})
+- **Income adjustment**: local median income vs. national (${_NATIONAL_MEDIAN_INCOME:,}), elasticity {_INCOME_ELASTICITY}
+- **Psychographic multiplier**: spending propensity x visit frequency by lifestyle segment
+- **Gravity probability**: Huff model P(choose this store) per block group
+
+**Confidence range**: 70%-135% of point estimate to account for model uncertainty,
+local competitive dynamics, and seasonal variation.
+
+**Customer volume**: Annual revenue / avg basket size = annual transactions.
+Divided by 365 (daily) or 52 (weekly).
+                        """)
 
     else:
         # Landing page
