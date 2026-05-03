@@ -111,7 +111,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-_APP_VERSION = "1.2.0"  # psychographic segmentation
+_APP_VERSION = "1.3.0"  # consumer filters
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -152,6 +152,164 @@ def _haversine_km(lat1, lon1, lat2, lon2):
 def filter_by_zip(df, zip_lat, zip_lon, radius_km):
     dists = df.apply(lambda r: _haversine_km(zip_lat, zip_lon, r["lat"], r["lon"]), axis=1)
     return df[dists <= radius_km].copy()
+
+
+# ---------------------------------------------------------------------------
+# Consumer filter helpers
+# ---------------------------------------------------------------------------
+
+_AGE_BANDS = {
+    "Under 18": ["age_under_18"],
+    "18-24": ["age_18_24"],
+    "25-34": ["age_25_34"],
+    "35-44": ["age_35_44"],
+    "45-54": ["age_45_54"],
+    "55-64": ["age_55_64"],
+    "65+": ["age_65_plus"],
+}
+
+
+def _dominant_age_band(demo: dict) -> str:
+    """Return the age band label with the highest population."""
+    best_label, best_val = "25-34", 0
+    for label, keys in _AGE_BANDS.items():
+        val = sum(demo.get(k, 0) for k in keys)
+        if val > best_val:
+            best_val = val
+            best_label = label
+    return best_label
+
+
+def _housing_tenure_label(demo: dict) -> str:
+    own = demo.get("pct_owner_occupied", 0.5)
+    rent = demo.get("pct_renter_occupied", 0.5)
+    if own >= 0.6:
+        return "Owner-dominated"
+    elif rent >= 0.6:
+        return "Renter-dominated"
+    return "Mixed"
+
+
+def _get_all_retail_affinities() -> list[str]:
+    """Collect unique retail affinities from all segment profiles."""
+    if not _PSYCHO_OK:
+        return []
+    affinities = set()
+    for prof in SEGMENT_PROFILES.values():
+        for a in prof.get("consumer_behavior", {}).get("retail_affinity", []):
+            affinities.add(a)
+    return sorted(affinities)
+
+
+def _segments_matching_behavior(field: str, values: list[str]) -> set[str]:
+    """Return segment codes whose consumer_behavior[field] is in values."""
+    if not _PSYCHO_OK or not values:
+        return set()
+    codes = set()
+    for code, prof in SEGMENT_PROFILES.items():
+        cb = prof.get("consumer_behavior", {})
+        val = cb.get(field)
+        if isinstance(val, list):
+            if any(v in values for v in val):
+                codes.add(code)
+        elif val in values:
+            codes.add(code)
+    return codes
+
+
+def apply_consumer_filters(origins_df, psycho_df, filters):
+    """Return boolean mask on origins_df for active consumer filters."""
+    mask = pd.Series(True, index=origins_df.index)
+
+    # Income range
+    inc_min = filters.get("income_min")
+    inc_max = filters.get("income_max")
+    if inc_min is not None and inc_max is not None:
+        inc = origins_df["median_income"].fillna(0)
+        mask &= (inc >= inc_min) & (inc <= inc_max)
+
+    # Dominant age band
+    age_bands = filters.get("age_bands", [])
+    if age_bands:
+        dom = origins_df["demographics"].apply(
+            lambda d: _dominant_age_band(d) if isinstance(d, dict) else "25-34"
+        )
+        mask &= dom.isin(age_bands)
+
+    # Housing tenure
+    tenure = filters.get("tenure", [])
+    if tenure:
+        ten_labels = origins_df["demographics"].apply(
+            lambda d: _housing_tenure_label(d) if isinstance(d, dict) else "Mixed"
+        )
+        mask &= ten_labels.isin(tenure)
+
+    # Lifestyle segments
+    segments = filters.get("segments", [])
+    if segments and psycho_df is not None and not psycho_df.empty:
+        seg_codes = psycho_df.reindex(origins_df.index)["segment_code"]
+        seg_names = {code: SEGMENT_PROFILES[code]["name"]
+                     for code in SEGMENT_PROFILES}
+        name_to_code = {v: k for k, v in seg_names.items()}
+        selected_codes = {name_to_code.get(s, s) for s in segments}
+        mask &= seg_codes.isin(selected_codes)
+
+    # Price sensitivity (behavioral → maps to segments)
+    price_sens = filters.get("price_sensitivity", [])
+    if price_sens:
+        matching = _segments_matching_behavior("price_sensitivity", price_sens)
+        if psycho_df is not None and not psycho_df.empty:
+            seg_codes = psycho_df.reindex(origins_df.index)["segment_code"]
+            mask &= seg_codes.isin(matching)
+
+    # Channel preference
+    channel = filters.get("channel_preference", [])
+    if channel:
+        matching = _segments_matching_behavior("channel_preference", channel)
+        if psycho_df is not None and not psycho_df.empty:
+            seg_codes = psycho_df.reindex(origins_df.index)["segment_code"]
+            mask &= seg_codes.isin(matching)
+
+    # Retail affinity
+    affinity = filters.get("retail_affinity", [])
+    if affinity:
+        matching = _segments_matching_behavior("retail_affinity", affinity)
+        if psycho_df is not None and not psycho_df.empty:
+            seg_codes = psycho_df.reindex(origins_df.index)["segment_code"]
+            mask &= seg_codes.isin(matching)
+
+    return mask
+
+
+def recalculate_from_filtered(prob_df, origins_df_filtered, stores_df):
+    """Re-rank stores using only filtered origins' population."""
+    prob_aligned = prob_df.reindex(index=origins_df_filtered.index).fillna(0)
+    pop_w = origins_df_filtered["population"].reindex(prob_aligned.index).fillna(0).astype(float)
+    demand = prob_aligned.mul(pop_w, axis=0).sum(axis=0)
+    total = demand.sum()
+    shares = (demand / total).sort_values(ascending=False) if total > 0 else demand
+    store_results = pd.DataFrame({
+        "name": stores_df["name"], "category": stores_df["category"],
+        "lat": stores_df["lat"], "lon": stores_df["lon"],
+        "demand": demand, "share": shares,
+    }).sort_values("share", ascending=False)
+    hhi = float((shares ** 2).sum() * 10_000)
+    top5 = float(shares.head(5).sum())
+    return store_results, hhi, top5
+
+
+def count_active_filters(filters):
+    """Count how many filter dimensions are active."""
+    count = 0
+    if filters.get("income_min") is not None:
+        inc_min, inc_max = filters["income_min"], filters["income_max"]
+        if inc_min > 0 or inc_max < 250_000:
+            count += 1
+    for key in ["age_bands", "tenure", "segments", "price_sensitivity",
+                "channel_preference", "retail_affinity"]:
+        if filters.get(key):
+            count += 1
+    return count
 
 
 def _clean_str(val):
@@ -616,6 +774,65 @@ def main():
         st.divider()
         run_btn = st.button("Run Analysis", type="primary", use_container_width=True)
 
+        # ── Consumer Filters (shown after analysis) ──────────────────
+        cf_income_min, cf_income_max = 0, 250_000
+        cf_age_bands, cf_tenure, cf_segments = [], [], []
+        cf_price_sens, cf_channel, cf_affinity = [], [], []
+
+        if "results" in st.session_state:
+            st.divider()
+            st.subheader("Consumer Filters")
+
+            with st.expander("Demographics"):
+                cf_income_min, cf_income_max = st.slider(
+                    "Income range ($K)",
+                    min_value=0, max_value=250_000, value=(0, 250_000),
+                    step=5_000, format="$%d",
+                )
+                cf_age_bands = st.multiselect(
+                    "Dominant age group",
+                    list(_AGE_BANDS.keys()),
+                )
+                cf_tenure = st.multiselect(
+                    "Housing tenure",
+                    ["Owner-dominated", "Renter-dominated", "Mixed"],
+                )
+
+            if _PSYCHO_OK:
+                seg_names = sorted(
+                    [p["name"] for p in SEGMENT_PROFILES.values()]
+                )
+                with st.expander("Lifestyle Segments"):
+                    cf_segments = st.multiselect(
+                        "Select segments", seg_names,
+                    )
+
+                with st.expander("Consumer Behavior"):
+                    cf_price_sens = st.multiselect(
+                        "Price sensitivity",
+                        ["low", "moderate", "high"],
+                    )
+                    cf_channel = st.multiselect(
+                        "Channel preference",
+                        ["in-store", "online", "omnichannel"],
+                    )
+                    cf_affinity = st.multiselect(
+                        "Retail affinity",
+                        _get_all_retail_affinities(),
+                    )
+
+            # Clear all
+            _consumer_filters = {
+                "income_min": cf_income_min, "income_max": cf_income_max,
+                "age_bands": cf_age_bands, "tenure": cf_tenure,
+                "segments": cf_segments, "price_sensitivity": cf_price_sens,
+                "channel_preference": cf_channel, "retail_affinity": cf_affinity,
+            }
+            n_active = count_active_filters(_consumer_filters)
+            if n_active > 0:
+                if st.button("Clear All Filters", use_container_width=True):
+                    st.rerun()
+
         # Advanced settings (collapsed)
         with st.expander("Advanced Settings"):
             bbox_radius = st.slider("Analysis radius (km)", 5.0, 50.0, 12.0, 1.0)
@@ -847,10 +1064,40 @@ def main():
                     st.error("No store results in filtered area.")
                     return
 
+        # ── Consumer filters ─────────────────────────────────────────────
+        consumer_filter_active = False
+        total_pop_unfiltered = int(origins_df["population"].sum())
+        if "results" in st.session_state:
+            _cf = {
+                "income_min": cf_income_min, "income_max": cf_income_max,
+                "age_bands": cf_age_bands, "tenure": cf_tenure,
+                "segments": cf_segments, "price_sensitivity": cf_price_sens,
+                "channel_preference": cf_channel, "retail_affinity": cf_affinity,
+            }
+            n_cf = count_active_filters(_cf)
+            if n_cf > 0:
+                psycho_df = st.session_state.get("psycho_df")
+                prob_df = active_results.get("prob_df")
+                cf_mask = apply_consumer_filters(origins_df, psycho_df, _cf)
+                origins_df = origins_df[cf_mask].copy()
+                if origins_df.empty:
+                    st.error("No block groups match the selected filters.")
+                    return
+                if prob_df is not None:
+                    store_results, cf_hhi, cf_top5 = recalculate_from_filtered(
+                        prob_df, origins_df, stores_df
+                    )
+                    active_results = dict(active_results)
+                    active_results["hhi"] = cf_hhi
+                    active_results["top5_concentration"] = cf_top5
+                    active_results["store_results"] = store_results
+                consumer_filter_active = True
+
         # ── Header ───────────────────────────────────────────────────────
         zip_badge = f"  |  ZIP {zip_input.strip()}" if zip_active else ""
+        filter_badge = f"  |  {n_cf} filter{'s' if n_cf != 1 else ''}" if consumer_filter_active else ""
         n_models = ensemble.get("n_models", 1) if ensemble else 1
-        st.title(f"{market_label}{zip_badge}")
+        st.title(f"{market_label}{zip_badge}{filter_badge}")
 
         ds_list = st.session_state.get("data_sources", [])
         st.caption(f"{n_models} models | {' + '.join(ds_list)}")
@@ -861,7 +1108,11 @@ def main():
         top_store = store_results.iloc[0]
 
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Population", f"{_safe_float(total_pop):,.0f}")
+        pop_label = f"{_safe_float(total_pop):,.0f}"
+        if consumer_filter_active:
+            pct_match = total_pop / total_pop_unfiltered * 100 if total_pop_unfiltered > 0 else 0
+            pop_label += f" ({pct_match:.0f}%)"
+        c1.metric("Population", pop_label)
         c2.metric("Households", f"{_safe_float(total_hh):,.0f}")
         c3.metric("Stores", f"{len(stores_df):,}")
         c4.metric("Avg Income", f"${_sf(avg_income, ',.0f')}" if _safe_float(avg_income) > 0 else "N/A")
