@@ -50,11 +50,16 @@ try:
 except ImportError:
     CKANDataGovLoader = None  # type: ignore[assignment,misc]
 
+try:
+    from gravity.data.noaa_climate import NOAAClimateLoader
+except ImportError:
+    NOAAClimateLoader = None  # type: ignore[assignment,misc]
+
 __all__ = [
     "Store", "ConsumerOrigin", "Transaction", "VisitEvent",
     "CensusLoader", "GooglePlacesLoader", "OSMLoader",
     "OSRMDistanceProvider", "SafeGraphLoader", "TransactionLoader",
     "CensusExpandedLoader", "SECEdgarLoader", "HealthDataLoader",
     "FREDLoader", "DataCommonsLoader", "FinancialModelingPrepLoader",
-    "CKANDataGovLoader",
+    "CKANDataGovLoader", "NOAAClimateLoader",
 ]

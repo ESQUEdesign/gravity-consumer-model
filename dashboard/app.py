@@ -141,6 +141,12 @@ try:
 except Exception:
     _CKAN_OK = False
 
+try:
+    from gravity.data.noaa_climate import NOAAClimateLoader
+    _NOAA_OK = True
+except Exception:
+    _NOAA_OK = False
+
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -647,6 +653,18 @@ def fetch_ckan_datasets(state_name: str, county_name: str) -> dict:
     try:
         loader = CKANDataGovLoader()
         return loader.summarize_available("", "", state_name, county_name)
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_noaa_climate(state_fips: str, county_fips: str, token: str) -> dict:
+    """Fetch NOAA climate context for a county."""
+    if not _NOAA_OK or not token:
+        return {}
+    try:
+        loader = NOAAClimateLoader(token=token)
+        return loader.get_climate_context(state_fips, county_fips)
     except Exception:
         return {}
 
@@ -2033,7 +2051,8 @@ def main():
                         "demo_summary", "bls_county", "bls_retail",
                         "dist_matrix", "psycho_df", "psycho_summary",
                         "cbp_data", "sec_benchmarks", "health_data",
-                        "fred_data", "dc_data", "fmp_benchmarks", "ckan_data"]:
+                        "fred_data", "dc_data", "fmp_benchmarks", "ckan_data",
+                        "noaa_data"]:
                 st.session_state.pop(_k, None)
 
         st.divider()
@@ -2112,9 +2131,10 @@ def main():
             fred_api_key = st.text_input("FRED (Federal Reserve)", type="password", placeholder="Free from fred.stlouisfed.org")
             dc_api_key = st.text_input("Data Commons", type="password", placeholder="Free from datacommons.org")
             fmp_api_key = st.text_input("Financial Modeling Prep", type="password", placeholder="Free: 250/day")
+            noaa_token = st.text_input("NOAA Climate (NCEI)", type="password", placeholder="Free from ncei.noaa.gov/cdo-web/token")
 
         st.divider()
-        st.caption(f"Census ACS + OSM + BLS + CBP + SEC + CDC | v{_APP_VERSION}")
+        st.caption(f"Census ACS + OSM + BLS + CBP + SEC + CDC + NOAA | v{_APP_VERSION}")
 
     # ── Resolve geography ────────────────────────────────────────────────
     if "bbox_radius" not in dir():
@@ -2335,6 +2355,14 @@ def main():
                         st.session_state.get("_county_name", ""),
                     )
 
+                    # Step 19: NOAA climate context (needs token)
+                    noaa_data = {}
+                    if noaa_token and noaa_token.strip():
+                        st.write("Fetching NOAA climate data...")
+                        noaa_data = fetch_noaa_climate(state_fips, county_fips, noaa_token.strip())
+                        if noaa_data:
+                            data_sources.append("NOAA NCEI")
+
                     n_models = sum(1 for r in model_results.values() if r and "error" not in r)
                     status.update(label=f"Done — {n_models} models, {len(data_sources)} data sources", state="complete")
 
@@ -2350,7 +2378,7 @@ def main():
                     "cbp_data": cbp_data, "sec_benchmarks": sec_benchmarks,
                     "health_data": health_data, "fred_data": fred_data,
                     "dc_data": dc_data, "fmp_benchmarks": fmp_benchmarks,
-                    "ckan_data": ckan_data,
+                    "ckan_data": ckan_data, "noaa_data": noaa_data,
                 })
 
         # Retrieve from session state
@@ -3879,6 +3907,9 @@ Divided by 365 (daily) or 52 (weekly).
                 {"name": "Alpaca Markets", "url": "https://alpaca.markets/", "status": "reference",
                  "desc": "Stock trading and market data API. Retail stock prices — niche fit for retail site analysis.",
                  "key": "Free (limited)"},
+                {"name": "NOAA NCEI", "url": "https://www.ncei.noaa.gov/", "status": "api_key",
+                 "desc": "Climate normals, temperature, precipitation, snowfall. Seasonal traffic patterns and outdoor retail viability.",
+                 "key": "Free token"},
             ]
 
             # Active sources section
@@ -3927,7 +3958,7 @@ Divided by 365 (daily) or 52 (weekly).
             st.divider()
             st.subheader("Expanded Data Feeds")
 
-            _exp_cols = st.columns(3)
+            _exp_cols = st.columns(4)
 
             with _exp_cols[0]:
                 st.markdown("**County Business Patterns**")
@@ -3965,6 +3996,26 @@ Divided by 365 (daily) or 52 (weekly).
                             st.metric(_fk.replace("_", " ").title(), _fv)
                 else:
                     st.caption("Add a FRED API key to enable.")
+
+            with _exp_cols[3]:
+                st.markdown("**Climate (NOAA NCEI)**")
+                _nd = st.session_state.get("noaa_data", {})
+                if _nd:
+                    _normals = _nd.get("normals", {})
+                    if _normals.get("avg_temp_f"):
+                        st.metric("Avg Temperature", f"{_normals['avg_temp_f']:.0f}°F")
+                    if _normals.get("annual_precip_in"):
+                        st.metric("Annual Precipitation", f"{_normals['annual_precip_in']:.1f}\"")
+                    if _normals.get("annual_snow_in"):
+                        st.metric("Annual Snowfall", f"{_normals['annual_snow_in']:.1f}\"")
+                    if _nd.get("climate_type"):
+                        st.metric("Climate Type", _nd["climate_type"].title())
+                    if _nd.get("seasonal_risk"):
+                        st.metric("Seasonal Risk", _nd["seasonal_risk"].title())
+                    if _nd.get("outdoor_retail_viability"):
+                        st.metric("Outdoor Retail", _nd["outdoor_retail_viability"].title())
+                else:
+                    st.caption("Add a NOAA token to enable.")
 
             # SEC/FMP benchmarks
             _sec = st.session_state.get("sec_benchmarks", [])
