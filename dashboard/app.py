@@ -621,10 +621,22 @@ def compute_ensemble(model_results, origins_df, stores_df):
     }
 
 
-def simulate_new_store(origins_df, stores_df, new_lat, new_lon, new_sqft, alpha, lam):
+def simulate_new_store(origins_df, stores_df, new_lat, new_lon, new_sqft,
+                       alpha, lam, name="NEW STORE", category="general",
+                       rating=0.0, price_level="moderate"):
+    # Price multiplier matching enrichment.py logic
+    _price_mult = {"budget": 0.8, "moderate": 1.0, "premium": 1.15, "luxury": 1.3}
+    price_m = _price_mult.get(price_level, 1.0)
+    # Composite attractiveness: sqft × (rating/3) × price_mult (if rating provided)
+    attr = float(new_sqft)
+    if rating > 0:
+        attr = attr * (rating / 3.0) * price_m
+
     new_store = pd.DataFrame([{
-        "name": "NEW STORE", "lat": new_lat, "lon": new_lon,
-        "category": "new", "brand": None, "square_footage": new_sqft,
+        "name": name, "lat": new_lat, "lon": new_lon,
+        "category": category, "brand": None,
+        "square_footage": new_sqft, "avg_rating": rating,
+        "composite_attractiveness": attr,
     }], index=["new_store_scenario"])
     stores_with_new = pd.concat([stores_df, new_store])
 
@@ -640,16 +652,21 @@ def simulate_new_store(origins_df, stores_df, new_lat, new_lon, new_sqft, alpha,
 
     impact_df = pd.DataFrame({
         "name": stores_df["name"],
+        "category": stores_df["category"],
         "baseline_share": baseline_shares,
         "scenario_share": scenario_shares,
         "change": change,
         "pct_change": (change / baseline_shares.replace(0, np.nan)) * 100,
     }).sort_values("change")
 
+    # Catchment analysis: top origins by probability for the new store
+    new_probs = scenario["prob_df"]["new_store_scenario"] if "new_store_scenario" in scenario["prob_df"].columns else None
+
     return {
         "new_store_share": new_share, "new_store_demand": new_demand,
         "impact_df": impact_df,
         "hhi_baseline": baseline["hhi"], "hhi_scenario": scenario["hhi"],
+        "new_store_probs": new_probs,
     }
 
 
@@ -1572,6 +1589,18 @@ def main():
             if zip_active:
                 center_lat, center_lon = zip_lat, zip_lon
 
+            # -- Store identity --
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                new_name = st.text_input("Store Name", value="New Store")
+            with sc2:
+                cat_options = sorted(set(
+                    list(_CATEGORY_MAP.values()) + stores_df["category"].dropna().unique().tolist()
+                ))
+                new_category = st.selectbox("Category", cat_options,
+                                            index=cat_options.index("grocery") if "grocery" in cat_options else 0)
+
+            # -- Location & size --
             c1, c2, c3 = st.columns(3)
             with c1:
                 new_lat = st.number_input("Latitude", value=center_lat, format="%.6f")
@@ -1580,13 +1609,37 @@ def main():
             with c3:
                 new_sqft = st.number_input("Square Footage", value=5000, step=500, min_value=500)
 
+            # -- Store attributes --
+            a1, a2 = st.columns(2)
+            with a1:
+                new_rating = st.slider("Expected Rating", 0.0, 5.0, 4.0, 0.1,
+                                       help="0 = ignore rating in attractiveness")
+            with a2:
+                new_price = st.selectbox("Price Level",
+                                         ["budget", "moderate", "premium", "luxury"],
+                                         index=1)
+
+            # -- Target audience (optional) --
+            target_segments = []
+            if _PSYCHO_OK:
+                seg_names = sorted([p["name"] for p in SEGMENT_PROFILES.values()])
+                target_segments = st.multiselect(
+                    "Target audience segments (optional)",
+                    seg_names,
+                    help="Highlights demand from these segments in results",
+                )
+
             if st.button("Simulate", type="primary"):
                 with st.spinner("Running scenario..."):
                     scenario = simulate_new_store(
                         origins_df, stores_df, new_lat, new_lon, float(new_sqft),
                         st.session_state.get("alpha", 1.0),
                         st.session_state.get("lam", 2.0),
+                        name=new_name, category=new_category,
+                        rating=new_rating, price_level=new_price,
                     )
+
+                # -- Key metrics --
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("New Store Share", _sf(scenario['new_store_share'], '.4%'))
                 c2.metric("New Store Demand", _sf(scenario['new_store_demand'], ',.0f'))
@@ -1596,16 +1649,104 @@ def main():
 
                 st.divider()
                 import plotly.express as px
-                impact = scenario["impact_df"].head(15).copy()
-                impact["label"] = impact["name"].str[:25]
-                impact = impact.iloc[::-1]
-                fig = px.bar(impact, x="change", y="label", orientation="h",
-                             color="change", color_continuous_scale="RdBu",
-                             title="Most Impacted Stores")
-                fig.update_layout(height=450, coloraxis_showscale=False,
-                                  xaxis_tickformat=".4%", yaxis_title=None,
-                                  margin=dict(l=0, r=20, t=40, b=20))
-                st.plotly_chart(fig, use_container_width=True)
+
+                # -- Impact by store + impact by category --
+                col_impact, col_cat = st.columns(2)
+
+                with col_impact:
+                    impact = scenario["impact_df"].head(15).copy()
+                    impact["label"] = impact["name"].str[:25]
+                    impact = impact.iloc[::-1]
+                    fig = px.bar(impact, x="change", y="label", orientation="h",
+                                 color="change", color_continuous_scale="RdBu",
+                                 title="Most Impacted Stores")
+                    fig.update_layout(height=450, coloraxis_showscale=False,
+                                      xaxis_tickformat=".4%", yaxis_title=None,
+                                      margin=dict(l=0, r=20, t=40, b=20))
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with col_cat:
+                    idf = scenario["impact_df"]
+                    cat_impact = idf.groupby("category")["change"].mean().sort_values()
+                    cat_df = pd.DataFrame({"category": cat_impact.index, "avg_share_change": cat_impact.values})
+                    fig2 = px.bar(cat_df, x="avg_share_change", y="category", orientation="h",
+                                  color="avg_share_change", color_continuous_scale="RdBu",
+                                  title="Impact by Category")
+                    fig2.update_layout(height=450, coloraxis_showscale=False,
+                                       xaxis_tickformat=".4%", yaxis_title=None,
+                                       margin=dict(l=0, r=20, t=40, b=20))
+                    st.plotly_chart(fig2, use_container_width=True)
+
+                # -- Catchment demographics & psychographics --
+                new_probs = scenario.get("new_store_probs")
+                if new_probs is not None and not new_probs.empty:
+                    st.divider()
+                    st.subheader("Catchment Profile")
+                    st.caption("Block groups weighted by probability of choosing this store")
+
+                    # Weight origins by choice probability
+                    prob_aligned = new_probs.reindex(origins_df.index).fillna(0)
+                    top_catchment = prob_aligned[prob_aligned > 0].sort_values(ascending=False)
+                    n_bg = (top_catchment > 0.01).sum()
+                    catch_pop = origins_df.loc[top_catchment.index, "population"]
+                    weighted_pop = (catch_pop * top_catchment).sum()
+                    catch_income = origins_df.loc[top_catchment.index, "median_income"]
+                    weighted_income = (catch_income * top_catchment).sum() / top_catchment.sum() if top_catchment.sum() > 0 else 0
+
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Catchment Block Groups", f"{n_bg:,}")
+                    m2.metric("Weighted Population", f"{weighted_pop:,.0f}")
+                    m3.metric("Avg Income (weighted)", f"${weighted_income:,.0f}")
+
+                    # Psychographic breakdown of catchment
+                    psycho_df = st.session_state.get("psycho_df")
+                    if _PSYCHO_OK and psycho_df is not None and not psycho_df.empty:
+                        catch_psycho = psycho_df.reindex(top_catchment.index).dropna(subset=["segment_name"])
+                        if not catch_psycho.empty:
+                            catch_psycho["weight"] = top_catchment.reindex(catch_psycho.index).fillna(0)
+                            seg_weights = catch_psycho.groupby("segment_name")["weight"].sum()
+                            seg_pct = (seg_weights / seg_weights.sum() * 100).sort_values(ascending=False)
+
+                            col_psycho, col_target = st.columns(2)
+                            with col_psycho:
+                                seg_chart = pd.DataFrame({"segment": seg_pct.index, "pct": seg_pct.values})
+                                fig3 = px.bar(seg_chart, x="pct", y="segment", orientation="h",
+                                              title="Catchment Lifestyle Segments",
+                                              color="pct", color_continuous_scale="Viridis")
+                                fig3.update_layout(height=350, coloraxis_showscale=False,
+                                                   xaxis_title="% of catchment", yaxis_title=None,
+                                                   margin=dict(l=0, r=20, t=40, b=20))
+                                st.plotly_chart(fig3, use_container_width=True)
+
+                            with col_target:
+                                if target_segments:
+                                    target_pct = sum(seg_pct.get(s, 0) for s in target_segments)
+                                    st.metric("Target Audience Match", f"{target_pct:.1f}%")
+                                    target_demand = 0
+                                    name_to_code = {}
+                                    for code, prof in SEGMENT_PROFILES.items():
+                                        name_to_code[prof["name"]] = code
+                                    for seg_name in target_segments:
+                                        code = name_to_code.get(seg_name)
+                                        if code:
+                                            seg_mask = catch_psycho["segment_code"] == code
+                                            seg_bg = catch_psycho[seg_mask].index
+                                            seg_pop = origins_df.loc[seg_bg, "population"]
+                                            seg_prob = top_catchment.reindex(seg_bg).fillna(0)
+                                            target_demand += (seg_pop * seg_prob).sum()
+                                    st.metric("Target Segment Demand", f"{target_demand:,.0f}")
+
+                                    # Show behavioral profile of target segments
+                                    for seg_name in target_segments:
+                                        code = name_to_code.get(seg_name)
+                                        if code and code in SEGMENT_PROFILES:
+                                            cb = SEGMENT_PROFILES[code].get("consumer_behavior", {})
+                                            st.markdown(f"**{seg_name}**")
+                                            st.text(f"  Retail affinity: {', '.join(cb.get('retail_affinity', []))}")
+                                            st.text(f"  Price sensitivity: {cb.get('price_sensitivity', 'N/A')}")
+                                            st.text(f"  Channel: {cb.get('channel_preference', 'N/A')}")
+                                else:
+                                    st.info("Select target audience segments above to see match analysis.")
 
     else:
         # Landing page
