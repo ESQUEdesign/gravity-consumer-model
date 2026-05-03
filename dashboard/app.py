@@ -111,7 +111,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-_APP_VERSION = "1.5.0"  # auto-run insights tab
+_APP_VERSION = "1.6.0"  # development analysis
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1072,7 +1072,264 @@ def build_insights_report(market_label, total_pop, total_hh, avg_income,
         "mean": float(avg_income) if avg_income > 0 else 0,
     }
 
+    # ── Development analysis ─────────────────────────────────────────
+    report["development"] = _build_development_analysis(
+        total_pop, total_hh, avg_income, income_ratio,
+        origins_df, consumer_dna, underserved, oversaturated,
+        gap_df, rings, bls_county, hhi,
+    )
+
     return report
+
+
+# ---------------------------------------------------------------------------
+# Development analysis engine
+# ---------------------------------------------------------------------------
+
+# Segment → residential product affinity
+_SEGMENT_HOUSING = {
+    "UP": {"types": ["luxury apartments", "urban lofts", "mixed-use condos"],
+           "price_tier": "premium", "density": "high",
+           "amenities": ["rooftop lounge", "coworking space", "bike storage", "EV charging"]},
+    "SF": {"types": ["single-family homes", "townhomes", "master-planned communities"],
+           "price_tier": "moderate", "density": "low",
+           "amenities": ["playground", "community pool", "walking trails", "sports courts"]},
+    "AE": {"types": ["luxury single-family", "estate homes", "active-adult communities"],
+           "price_tier": "premium", "density": "low",
+           "amenities": ["golf course", "clubhouse", "wine cellar", "concierge"]},
+    "CT": {"types": ["student housing", "micro-apartments", "co-living"],
+           "price_tier": "budget", "density": "high",
+           "amenities": ["study rooms", "high-speed wifi", "laundry", "package lockers"]},
+    "RT": {"types": ["manufactured homes", "starter homes", "rural single-family"],
+           "price_tier": "budget", "density": "very low",
+           "amenities": ["large lots", "garages", "storage", "outdoor space"]},
+    "UE": {"types": ["affordable apartments", "workforce housing", "LIHTC developments"],
+           "price_tier": "budget", "density": "high",
+           "amenities": ["laundry facilities", "community room", "transit access", "daycare"]},
+    "SM": {"types": ["suburban townhomes", "garden-style apartments", "entry-level single-family"],
+           "price_tier": "moderate", "density": "medium",
+           "amenities": ["fitness center", "dog park", "community garden", "picnic area"]},
+    "MU": {"types": ["mixed-income apartments", "live-work units", "adaptive reuse lofts"],
+           "price_tier": "moderate", "density": "high",
+           "amenities": ["cultural space", "multilingual signage", "community kitchen", "transit access"]},
+    "YM": {"types": ["luxury apartments", "build-to-rent townhomes", "flex-living suites"],
+           "price_tier": "moderate-premium", "density": "medium-high",
+           "amenities": ["coworking", "fitness center", "package lockers", "pet spa"]},
+    "WE": {"types": ["single-family homes", "large-lot homes", "hobby farm parcels"],
+           "price_tier": "moderate", "density": "very low",
+           "amenities": ["oversized garages", "workshops", "RV parking", "acreage"]},
+    "GC": {"types": ["age-restricted communities", "patio homes", "ranch-style downsizers"],
+           "price_tier": "moderate", "density": "low",
+           "amenities": ["single-story", "low maintenance", "clubhouse", "walking paths"]},
+    "RL": {"types": ["55+ active-adult", "assisted living", "independent living", "continuing care"],
+           "price_tier": "moderate-premium", "density": "medium",
+           "amenities": ["healthcare access", "dining hall", "shuttle service", "social programming"]},
+}
+
+# Income → housing price points (2024 national benchmarks)
+_INCOME_TO_HOME_PRICE = {
+    "very_low":   {"label": "< $35K",     "max_home": 125_000, "max_rent": 875,   "tier": "Affordable / workforce"},
+    "low":        {"label": "$35K–$50K",   "max_home": 175_000, "max_rent": 1_250,  "tier": "Entry-level"},
+    "moderate":   {"label": "$50K–$75K",   "max_home": 265_000, "max_rent": 1_875,  "tier": "Mid-market"},
+    "upper_mid":  {"label": "$75K–$100K",  "max_home": 350_000, "max_rent": 2_500,  "tier": "Move-up"},
+    "high":       {"label": "$100K–$150K", "max_home": 525_000, "max_rent": 3_750,  "tier": "Premium"},
+    "very_high":  {"label": "$150K+",      "max_home": 750_000, "max_rent": 5_000,  "tier": "Luxury"},
+}
+
+# Segment → retail anchor recommendations
+_SEGMENT_RETAIL_ANCHORS = {
+    "UP": ["Whole Foods / Trader Joe's", "boutique fitness", "specialty coffee", "wine bar"],
+    "SF": ["Kroger / Publix", "Target", "Chick-fil-A", "urgent care", "children's enrichment"],
+    "AE": ["upscale dining", "specialty wine/spirits", "home furnishing", "professional services"],
+    "CT": ["fast casual restaurants", "coffee shops", "thrift / resale", "phone repair"],
+    "RT": ["Dollar General", "Tractor Supply", "AutoZone", "local diner", "hardware"],
+    "UE": ["Dollar Tree", "check cashing / payday", "laundromat", "convenience / bodega"],
+    "SM": ["grocery chain", "fast food corridor", "nail salon / barbershop", "mid-tier apparel"],
+    "MU": ["ethnic grocery / market", "restaurant row", "wireless store", "remittance / money transfer"],
+    "YM": ["fast casual", "boutique fitness", "pet store", "coworking / flex office"],
+    "WE": ["Home Depot / Lowe's", "auto parts", "sporting goods", "BBQ / casual dining"],
+    "GC": ["pharmacy (CVS/Walgreens)", "medical office", "casual dining", "grocery"],
+    "RL": ["pharmacy", "medical/dental office", "casual dining", "grocery delivery hub"],
+}
+
+
+def _income_tier(avg_income):
+    """Map average income to a tier key."""
+    if avg_income < 35_000:
+        return "very_low"
+    elif avg_income < 50_000:
+        return "low"
+    elif avg_income < 75_000:
+        return "moderate"
+    elif avg_income < 100_000:
+        return "upper_mid"
+    elif avg_income < 150_000:
+        return "high"
+    return "very_high"
+
+
+def _build_development_analysis(total_pop, total_hh, avg_income, income_ratio,
+                                 origins_df, consumer_dna, underserved,
+                                 oversaturated, gap_df, rings, bls_county, hhi):
+    """Generate recommended residential, retail, and mixed-use development analysis."""
+    dev = {}
+
+    tier_key = _income_tier(avg_income)
+    price_info = _INCOME_TO_HOME_PRICE[tier_key]
+
+    # ── Housing demand indicators ────────────────────────────────
+    # Owner vs renter split from demographics
+    own_pcts, rent_pcts = [], []
+    if "demographics" in origins_df.columns:
+        for d in origins_df["demographics"]:
+            if isinstance(d, dict):
+                own_pcts.append(d.get("pct_owner_occupied", 0.5))
+                rent_pcts.append(d.get("pct_renter_occupied", 0.5))
+    avg_own = sum(own_pcts) / len(own_pcts) if own_pcts else 0.5
+    avg_rent = sum(rent_pcts) / len(rent_pcts) if rent_pcts else 0.5
+
+    # Age composition for housing demand
+    age_young, age_mid, age_old = 0, 0, 0
+    if "demographics" in origins_df.columns:
+        for d in origins_df["demographics"]:
+            if isinstance(d, dict):
+                age_young += d.get("age_under_18", 0) + d.get("age_18_24", 0)
+                age_mid += d.get("age_25_34", 0) + d.get("age_35_44", 0) + d.get("age_45_54", 0)
+                age_old += d.get("age_55_64", 0) + d.get("age_65_plus", 0)
+    total_age = age_young + age_mid + age_old
+    pct_young = age_young / total_age if total_age > 0 else 0.33
+    pct_mid = age_mid / total_age if total_age > 0 else 0.34
+    pct_old = age_old / total_age if total_age > 0 else 0.33
+
+    dev["tenure_split"] = {"owner_pct": avg_own, "renter_pct": avg_rent}
+    dev["age_composition"] = {"young_pct": pct_young, "middle_pct": pct_mid, "older_pct": pct_old}
+
+    # ── Price points ─────────────────────────────────────────────
+    dev["price_tier"] = price_info["tier"]
+    dev["max_home_price"] = price_info["max_home"]
+    dev["max_monthly_rent"] = price_info["max_rent"]
+    dev["income_tier"] = tier_key
+    dev["income_label"] = price_info["label"]
+
+    # Housing price range (using income distribution from origins)
+    inc_valid = origins_df["median_income"][origins_df["median_income"] > 0]
+    if not inc_valid.empty:
+        p25 = float(inc_valid.quantile(0.25))
+        p75 = float(inc_valid.quantile(0.75))
+        dev["home_price_range"] = {
+            "low": int(p25 * 3.5),   # 3.5x income = affordable threshold
+            "mid": int(avg_income * 3.5),
+            "high": int(p75 * 4.0),  # stretch for upper quartile
+        }
+        dev["rent_range"] = {
+            "low": int(p25 * 0.30 / 12),   # 30% of income / 12 months
+            "mid": int(avg_income * 0.30 / 12),
+            "high": int(p75 * 0.30 / 12),
+        }
+    else:
+        dev["home_price_range"] = {"low": 0, "mid": 0, "high": 0}
+        dev["rent_range"] = {"low": 0, "mid": 0, "high": 0}
+
+    # ── Residential recommendations by segment ───────────────────
+    housing_recs = []
+    for seg in consumer_dna:
+        code = seg.get("code", "")
+        sh = _SEGMENT_HOUSING.get(code)
+        if sh:
+            housing_recs.append({
+                "segment": seg["name"],
+                "pct": seg["pct"],
+                "product_types": sh["types"],
+                "price_tier": sh["price_tier"],
+                "density": sh["density"],
+                "amenities": sh["amenities"],
+            })
+    dev["housing_recs"] = housing_recs
+
+    # ── Primary residential recommendation (narrative) ───────────
+    primary_housing = []
+    if avg_rent > 0.55:
+        primary_housing.append("Multifamily rental dominates — prioritise apartments and build-to-rent.")
+    elif avg_own > 0.70:
+        primary_housing.append("Strong owner-occupied market — single-family and townhome developments have demand.")
+    else:
+        primary_housing.append("Mixed tenure market — consider a blend of rental and for-sale product.")
+
+    if pct_young > 0.35:
+        primary_housing.append("Young population skew supports student housing, starter homes, or affordable apartments.")
+    if pct_old > 0.30:
+        primary_housing.append("Aging population creates demand for age-restricted, patio homes, and assisted living.")
+    if pct_mid > 0.45:
+        primary_housing.append("Working-age majority supports family-oriented housing: townhomes, move-up homes, and garden apartments.")
+
+    pop_3mi = rings.get("3mi", {}).get("population", 0) if rings else 0
+    if pop_3mi < 10_000:
+        primary_housing.append("Low density favors large-lot single-family, manufactured homes, or rural estate parcels.")
+    elif pop_3mi >= 50_000:
+        primary_housing.append("High density supports mid-rise to high-rise multifamily and mixed-use projects.")
+
+    dev["primary_housing_narrative"] = primary_housing
+
+    # ── Target audiences ─────────────────────────────────────────
+    audiences = []
+    for seg in consumer_dna:
+        code = seg.get("code", "")
+        pb = seg.get("playbook", {})
+        if pb:
+            audiences.append({
+                "segment": seg["name"],
+                "pct": seg["pct"],
+                "description": pb.get("who_they_are", pb.get("description", "")),
+                "price_sensitivity": pb.get("price_sensitivity", ""),
+                "channel": pb.get("channel_preference", ""),
+                "retail_draw": _SEGMENT_RETAIL_ANCHORS.get(code, []),
+            })
+    dev["target_audiences"] = audiences
+
+    # ── Retail / commercial recommendations ──────────────────────
+    retail_recs = []
+    # From segment anchors
+    seen_retail = set()
+    for seg in consumer_dna[:2]:
+        code = seg.get("code", "")
+        anchors = _SEGMENT_RETAIL_ANCHORS.get(code, [])
+        for a in anchors:
+            if a not in seen_retail:
+                retail_recs.append({
+                    "store_type": a,
+                    "driven_by": seg["name"],
+                    "rationale": f"High affinity with {seg['name']} segment ({seg['pct']:.0f}% of pop)",
+                })
+                seen_retail.add(a)
+
+    # From underserved categories
+    for gap in underserved[:3]:
+        cat = gap["category"]
+        tam_m = gap.get("tam", 0) / 1e6
+        if cat not in seen_retail:
+            retail_recs.append({
+                "store_type": f"{cat.title()} retailer",
+                "driven_by": "Market gap",
+                "rationale": f"Underserved at {gap.get('saturation', 0):.0%} saturation — ${tam_m:,.1f}M TAM",
+            })
+            seen_retail.add(cat)
+
+    dev["retail_recs"] = retail_recs
+
+    # ── Mixed-use development concept ────────────────────────────
+    if housing_recs:
+        top_housing = housing_recs[0]
+        top_retail = retail_recs[:3] if retail_recs else []
+        concept_parts = []
+        concept_parts.append(f"Ground-floor commercial with {', '.join(r['store_type'] for r in top_retail)}" if top_retail else "Ground-floor flexible commercial")
+        concept_parts.append(f"Upper floors: {', '.join(top_housing['product_types'][:2])}")
+        if top_housing.get("amenities"):
+            concept_parts.append(f"Amenities: {', '.join(top_housing['amenities'][:3])}")
+        dev["mixed_use_concept"] = concept_parts
+    else:
+        dev["mixed_use_concept"] = []
+
+    return dev
 
 
 # ---------------------------------------------------------------------------
@@ -2056,6 +2313,100 @@ def main():
                 st.markdown(f"**{i}. {rec['title']}**")
                 st.markdown(f"  {rec['detail']}")
                 st.markdown("")
+
+            st.divider()
+
+            # --- G2. Development Analysis ---
+            st.subheader("Development Analysis")
+            _dev = insights_report.get("development", {})
+
+            if _dev:
+                # -- Price points & housing demand --
+                st.markdown("#### Housing Market Indicators")
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric("Market Tier", _dev.get("price_tier", "N/A"))
+                _tenure = _dev.get("tenure_split", {})
+                d2.metric("Owner-Occupied", f"{_tenure.get('owner_pct', 0):.0%}")
+                d3.metric("Renter-Occupied", f"{_tenure.get('renter_pct', 0):.0%}")
+                _age_comp = _dev.get("age_composition", {})
+                _dominant_age = "Young" if _age_comp.get("young_pct", 0) > 0.35 else "Aging" if _age_comp.get("older_pct", 0) > 0.30 else "Working-age"
+                d4.metric("Age Profile", _dominant_age)
+
+                # Price range cards
+                _hpr = _dev.get("home_price_range", {})
+                _rr = _dev.get("rent_range", {})
+                if _hpr.get("mid", 0) > 0:
+                    st.markdown("#### Supportable Price Points")
+                    p1, p2, p3 = st.columns(3)
+                    p1.metric("Entry-Level Home", f"${_hpr.get('low', 0):,}")
+                    p2.metric("Market Mid-Point", f"${_hpr.get('mid', 0):,}")
+                    p3.metric("Premium Home", f"${_hpr.get('high', 0):,}")
+
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Affordable Rent", f"${_rr.get('low', 0):,}/mo")
+                    r2.metric("Market Rent", f"${_rr.get('mid', 0):,}/mo")
+                    r3.metric("Premium Rent", f"${_rr.get('high', 0):,}/mo")
+
+                    st.caption("Home prices based on 3.5x income; rents on 30% of income rule. "
+                               f"Max supportable home: ${_dev.get('max_home_price', 0):,} | "
+                               f"Max rent: ${_dev.get('max_monthly_rent', 0):,}/mo")
+
+                # Primary housing narrative
+                _phn = _dev.get("primary_housing_narrative", [])
+                if _phn:
+                    st.markdown("#### Market Signals")
+                    for line in _phn:
+                        st.markdown(f"- {line}")
+
+                st.markdown("")
+
+                # -- Residential product recommendations by segment --
+                _hr = _dev.get("housing_recs", [])
+                if _hr:
+                    st.markdown("#### Recommended Residential Products")
+                    _hr_cols = st.columns(min(len(_hr), 3))
+                    for i, rec in enumerate(_hr[:3]):
+                        with _hr_cols[i]:
+                            st.markdown(f"**{rec['segment']}** ({rec['pct']:.0f}%)")
+                            st.markdown(f"Density: {rec['density']} &nbsp;|&nbsp; Tier: {rec['price_tier']}")
+                            st.markdown("**Product types:**")
+                            for pt in rec["product_types"]:
+                                st.markdown(f"- {pt}")
+                            st.markdown("**Amenities:**")
+                            for am in rec["amenities"]:
+                                st.markdown(f"- {am}")
+
+                st.markdown("")
+
+                # -- Target audiences --
+                _ta = _dev.get("target_audiences", [])
+                if _ta:
+                    st.markdown("#### Target Audiences")
+                    for aud in _ta:
+                        with st.expander(f"{aud['segment']} ({aud['pct']:.0f}% of population)"):
+                            st.markdown(f"_{aud.get('description', '')}_")
+                            st.markdown(f"**Price sensitivity**: {aud.get('price_sensitivity', 'N/A')}")
+                            st.markdown(f"**Shopping channel**: {aud.get('channel', 'N/A')}")
+                            rd = aud.get("retail_draw", [])
+                            if rd:
+                                st.markdown(f"**Retail draws**: {', '.join(rd)}")
+
+                st.markdown("")
+
+                # -- Retail / commercial recommendations --
+                _rr_list = _dev.get("retail_recs", [])
+                if _rr_list:
+                    st.markdown("#### Recommended Retail & Commercial Tenants")
+                    rr_df = pd.DataFrame(_rr_list)
+                    rr_df.columns = ["Store / Tenant Type", "Driven By", "Rationale"]
+                    st.dataframe(rr_df, use_container_width=True, hide_index=True)
+
+                # -- Mixed-use concept --
+                _muc = _dev.get("mixed_use_concept", [])
+                if _muc:
+                    st.markdown("#### Mixed-Use Development Concept")
+                    for line in _muc:
+                        st.markdown(f"- {line}")
 
             # --- H. Market at a Glance (collapsible) ---
             with st.expander("Market at a Glance"):
