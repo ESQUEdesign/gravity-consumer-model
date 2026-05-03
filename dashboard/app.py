@@ -99,6 +99,48 @@ try:
 except Exception:
     _PSYCHO_OK = False
 
+try:
+    from gravity.data.census_expanded import CensusExpandedLoader
+    _CBP_OK = True
+except Exception:
+    _CBP_OK = False
+
+try:
+    from gravity.data.sec_edgar import SECEdgarLoader
+    _SEC_OK = True
+except Exception:
+    _SEC_OK = False
+
+try:
+    from gravity.data.healthdata import HealthDataLoader
+    _HEALTH_OK = True
+except Exception:
+    _HEALTH_OK = False
+
+try:
+    from gravity.data.fred import FREDLoader
+    _FRED_OK = True
+except Exception:
+    _FRED_OK = False
+
+try:
+    from gravity.data.data_commons import DataCommonsLoader
+    _DC_OK = True
+except Exception:
+    _DC_OK = False
+
+try:
+    from gravity.data.fmp import FinancialModelingPrepLoader
+    _FMP_OK = True
+except Exception:
+    _FMP_OK = False
+
+try:
+    from gravity.data.ckan_datagov import CKANDataGovLoader
+    _CKAN_OK = True
+except Exception:
+    _CKAN_OK = False
+
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -111,7 +153,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-_APP_VERSION = "2.0.0"  # esque design system
+_APP_VERSION = "2.1.0"  # expanded data sources
 
 # ---------------------------------------------------------------------------
 # Esque design system — Plotly global template
@@ -523,6 +565,90 @@ def fetch_bls(state_fips: str, county_fips: str) -> tuple:
         return county_data, retail_data
     except Exception:
         return {}, {}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_cbp(state_fips: str, county_fips: str) -> dict:
+    """Fetch Census County Business Patterns data."""
+    if not _CBP_OK:
+        return {}
+    try:
+        loader = CensusExpandedLoader()
+        return loader.get_county_business_patterns(state_fips, county_fips)
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_sec_benchmarks(brands: tuple) -> list:
+    """Fetch SEC EDGAR financials for public retail brands."""
+    if not _SEC_OK or not brands:
+        return []
+    try:
+        loader = SECEdgarLoader()
+        return loader.benchmark_competitors(list(brands))
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_health(state_fips: str, county_fips: str) -> dict:
+    """Fetch CDC/HHS health context data."""
+    if not _HEALTH_OK:
+        return {}
+    try:
+        loader = HealthDataLoader()
+        return loader.get_health_context(state_fips, county_fips)
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_fred(api_key: str) -> dict:
+    """Fetch FRED macro economic indicators."""
+    if not _FRED_OK or not api_key:
+        return {}
+    try:
+        loader = FREDLoader(api_key=api_key)
+        return loader.get_retail_context()
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_data_commons(state_fips: str, county_fips: str, api_key: str) -> dict:
+    """Fetch Data Commons demographic/housing/economic indicators."""
+    if not _DC_OK or not api_key:
+        return {}
+    try:
+        loader = DataCommonsLoader(api_key=api_key)
+        return loader.get_county_context(state_fips, county_fips)
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_fmp_benchmarks(brands: tuple, api_key: str) -> list:
+    """Fetch Financial Modeling Prep retailer benchmarks."""
+    if not _FMP_OK or not api_key or not brands:
+        return []
+    try:
+        loader = FinancialModelingPrepLoader(api_key=api_key)
+        return loader.benchmark_retail(list(brands))
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_ckan_datasets(state_name: str, county_name: str) -> dict:
+    """Search data.gov for available government datasets."""
+    if not _CKAN_OK:
+        return {}
+    try:
+        loader = CKANDataGovLoader()
+        return loader.summarize_available("", "", state_name, county_name)
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1905,7 +2031,9 @@ def main():
             for _k in ["results", "model_results", "ensemble", "origins_df",
                         "stores_df", "market_label", "bbox", "data_sources",
                         "demo_summary", "bls_county", "bls_retail",
-                        "dist_matrix", "psycho_df", "psycho_summary"]:
+                        "dist_matrix", "psycho_df", "psycho_summary",
+                        "cbp_data", "sec_benchmarks", "health_data",
+                        "fred_data", "dc_data", "fmp_benchmarks", "ckan_data"]:
                 st.session_state.pop(_k, None)
 
         st.divider()
@@ -1981,9 +2109,12 @@ def main():
         with st.expander("API Keys (optional)"):
             google_api_key = st.text_input("Google Places", type="password", placeholder="Adds ratings & reviews")
             yelp_api_key = st.text_input("Yelp Fusion", type="password", placeholder="Free: 5000/day")
+            fred_api_key = st.text_input("FRED (Federal Reserve)", type="password", placeholder="Free from fred.stlouisfed.org")
+            dc_api_key = st.text_input("Data Commons", type="password", placeholder="Free from datacommons.org")
+            fmp_api_key = st.text_input("Financial Modeling Prep", type="password", placeholder="Free: 250/day")
 
         st.divider()
-        st.caption(f"Census ACS + OSM + OSRM + BLS + Store DB | v{_APP_VERSION}")
+        st.caption(f"Census ACS + OSM + BLS + CBP + SEC + CDC | v{_APP_VERSION}")
 
     # ── Resolve geography ────────────────────────────────────────────────
     if "bbox_radius" not in dir():
@@ -2004,6 +2135,8 @@ def main():
     state_info = STATE_FIPS.get(state_fips, {})
     county_name = county_labels[selected_county_idx].split(" (pop")[0]
     market_label = f"{county_name}, {state_info.get('abbr', state_fips)}"
+    st.session_state["_state_name"] = state_info.get("name", "")
+    st.session_state["_county_name"] = county_name
 
     # ── Run analysis ─────────────────────────────────────────────────────
     _should_run = run_btn or _market_changed
@@ -2155,6 +2288,53 @@ def main():
                         except Exception as e:
                             st.write(f"Psychographics: {e}")
 
+                    # Step 12: Census County Business Patterns
+                    cbp_data = fetch_cbp(state_fips, county_fips)
+                    if cbp_data:
+                        data_sources.append("Census CBP")
+
+                    # Step 13: Health context (CDC/HHS)
+                    health_data = fetch_health(state_fips, county_fips)
+                    if health_data:
+                        data_sources.append("HealthData.gov")
+
+                    # Step 14: SEC EDGAR benchmarks
+                    sec_benchmarks = []
+                    _brands = stores_df["brand"].dropna().unique().tolist() if "brand" in stores_df.columns else []
+                    if _brands:
+                        sec_benchmarks = fetch_sec_benchmarks(tuple(sorted(set(_brands))))
+                        if sec_benchmarks:
+                            data_sources.append("SEC EDGAR")
+
+                    # Step 15: FRED macro indicators (needs API key)
+                    fred_data = {}
+                    if fred_api_key and fred_api_key.strip():
+                        st.write("Fetching FRED macro indicators...")
+                        fred_data = fetch_fred(fred_api_key.strip())
+                        if fred_data:
+                            data_sources.append("FRED")
+
+                    # Step 16: Data Commons (needs API key)
+                    dc_data = {}
+                    if dc_api_key and dc_api_key.strip():
+                        st.write("Fetching Data Commons indicators...")
+                        dc_data = fetch_data_commons(state_fips, county_fips, dc_api_key.strip())
+                        if dc_data:
+                            data_sources.append("Data Commons")
+
+                    # Step 17: FMP benchmarks (needs API key)
+                    fmp_benchmarks = []
+                    if fmp_api_key and fmp_api_key.strip() and _brands:
+                        fmp_benchmarks = fetch_fmp_benchmarks(tuple(sorted(set(_brands))), fmp_api_key.strip())
+                        if fmp_benchmarks:
+                            data_sources.append("FMP")
+
+                    # Step 18: CKAN/data.gov dataset discovery
+                    ckan_data = fetch_ckan_datasets(
+                        st.session_state.get("_state_name", ""),
+                        st.session_state.get("_county_name", ""),
+                    )
+
                     n_models = sum(1 for r in model_results.values() if r and "error" not in r)
                     status.update(label=f"Done — {n_models} models, {len(data_sources)} data sources", state="complete")
 
@@ -2167,6 +2347,10 @@ def main():
                     "bls_county": bls_county, "bls_retail": bls_retail,
                     "dist_matrix": dist_matrix,
                     "psycho_df": psycho_df, "psycho_summary": psycho_summary,
+                    "cbp_data": cbp_data, "sec_benchmarks": sec_benchmarks,
+                    "health_data": health_data, "fred_data": fred_data,
+                    "dc_data": dc_data, "fmp_benchmarks": fmp_benchmarks,
+                    "ckan_data": ckan_data,
                 })
 
         # Retrieve from session state
@@ -2303,8 +2487,8 @@ def main():
         )
 
         # ── Tabs ─────────────────────────────────────────────────────────
-        tab_insights, tab_overview, tab_demo, tab_psycho, tab_competition, tab_scenario = st.tabs([
-            "Insights", "Market Overview", "Demographics", "Psychographics", "Competition", "Scenario",
+        tab_insights, tab_overview, tab_demo, tab_psycho, tab_competition, tab_scenario, tab_sources = st.tabs([
+            "Insights", "Market Overview", "Demographics", "Psychographics", "Competition", "Scenario", "Data Sources",
         ])
 
         # ── Tab 0: Insights ───────────────────────────────────────────────
@@ -3632,6 +3816,184 @@ local competitive dynamics, and seasonal variation.
 Divided by 365 (daily) or 52 (weekly).
                         """)
 
+        # ── Tab 6: Data Sources ──────────────────────────────────────────
+        with tab_sources:
+            st.header("Data Sources & APIs")
+            st.markdown("All data sources connected to this analysis, with links to documentation.")
+
+            _active_sources = st.session_state.get("data_sources", [])
+
+            # --- All data sources registry ---
+            _ALL_SOURCES = [
+                {"name": "Census ACS", "url": "https://www.census.gov/", "status": "core",
+                 "desc": "95 demographic variables at block-group level. Population, income, age, race, education, housing, commute.",
+                 "key": "Optional"},
+                {"name": "OpenStreetMap", "url": "https://www.openstreetmap.org/", "status": "core",
+                 "desc": "Retail store locations, categories, and amenities via Overpass API.",
+                 "key": "None"},
+                {"name": "BLS QCEW", "url": "https://www.bls.gov/cew/", "status": "core",
+                 "desc": "County employment, wages, and establishment counts by industry sector.",
+                 "key": "None"},
+                {"name": "OSRM", "url": "https://project-osrm.org/", "status": "core",
+                 "desc": "Real driving-time distance matrices between origins and stores.",
+                 "key": "None"},
+                {"name": "Census CBP", "url": "https://www.census.gov/programs-surveys/cbp.html", "status": "active",
+                 "desc": "County Business Patterns — establishment counts by NAICS sector.",
+                 "key": "None"},
+                {"name": "SEC EDGAR", "url": "https://www.sec.gov/search-filings", "status": "active",
+                 "desc": "Public retailer financials — revenue, margins, store counts for 40+ chains.",
+                 "key": "None"},
+                {"name": "HealthData.gov", "url": "https://healthdata.gov/", "status": "active",
+                 "desc": "CDC county health rankings, food environment data, healthcare facility counts.",
+                 "key": "None"},
+                {"name": "CKAN / data.gov", "url": "https://github.com/ckan/ckan", "status": "active",
+                 "desc": "Government open data portal — searches for business licenses, permits, property records.",
+                 "key": "None"},
+                {"name": "Data Commons", "url": "https://www.datacommons.org/", "status": "api_key",
+                 "desc": "Google's unified API — housing values, education, unemployment, health insurance, commute times.",
+                 "key": "Free key"},
+                {"name": "FRED", "url": "https://www.nber.org/", "status": "api_key",
+                 "desc": "Federal Reserve Economic Data — CPI, unemployment, consumer confidence, retail sales indices.",
+                 "key": "Free key"},
+                {"name": "Financial Modeling Prep", "url": "https://site.financialmodelingprep.com/developer/docs", "status": "api_key",
+                 "desc": "Pre-parsed retailer financial ratios, sector screening, company profiles.",
+                 "key": "Free (250/day)"},
+                {"name": "Zillow", "url": "https://www.zillow.com/", "status": "reference",
+                 "desc": "Real estate listings and home values. Free API deprecated 2021; ZTRAX shut down 2023. No free programmatic access.",
+                 "key": "N/A"},
+                {"name": "ZoomInfo", "url": "https://www.zoominfo.com/", "status": "reference",
+                 "desc": "Enterprise firmographic data — company headcount, revenue, locations. Starts at ~$50K/year.",
+                 "key": "Enterprise"},
+                {"name": "RudderStack", "url": "https://www.rudderstack.com/", "status": "reference",
+                 "desc": "Customer data platform / event streaming pipeline. Not a data source — a data routing tool.",
+                 "key": "N/A"},
+                {"name": "Awesome Public Datasets", "url": "https://github.com/awesomedata/awesome-public-datasets", "status": "reference",
+                 "desc": "Curated GitHub list of 500+ public datasets across economics, real estate, and more.",
+                 "key": "N/A"},
+                {"name": "Azure Open Datasets", "url": "https://azure.microsoft.com/en-us/products/open-datasets", "status": "reference",
+                 "desc": "Microsoft-hosted open datasets (Census, CPI, weather). Same data available via free source APIs.",
+                 "key": "Azure account"},
+                {"name": "AWS Databases", "url": "https://aws.amazon.com/products/databases/", "status": "reference",
+                 "desc": "Cloud database infrastructure and open data registry. Infrastructure service, not a direct data source.",
+                 "key": "AWS account"},
+                {"name": "Alpaca Markets", "url": "https://alpaca.markets/", "status": "reference",
+                 "desc": "Stock trading and market data API. Retail stock prices — niche fit for retail site analysis.",
+                 "key": "Free (limited)"},
+            ]
+
+            # Active sources section
+            st.subheader("Active Sources in This Analysis")
+            if _active_sources:
+                _src_cols = st.columns(min(len(_active_sources), 4))
+                for i, src_name in enumerate(_active_sources):
+                    with _src_cols[i % min(len(_active_sources), 4)]:
+                        st.metric(src_name, "Active")
+            else:
+                st.caption("Run an analysis to see active data sources.")
+
+            st.divider()
+
+            # Full registry
+            st.subheader("All Connected Sources")
+            for _src in _ALL_SOURCES:
+                _status = _src["status"]
+                if _status == "core":
+                    _badge = "CORE"
+                elif _status == "active":
+                    _badge = "ACTIVE"
+                elif _status == "api_key":
+                    _badge = "AVAILABLE (needs key)"
+                else:
+                    _badge = "REFERENCE"
+
+                _in_use = _src["name"] in " ".join(_active_sources) if _active_sources else False
+                _icon = ">" if _in_use else "-"
+
+                st.markdown(f"**{_icon} [{_src['name']}]({_src['url']})** — {_badge} | Key: {_src['key']}")
+                st.caption(_src["desc"])
+
+            # Show CKAN discovered datasets if available
+            _ckan_results = st.session_state.get("ckan_data", {})
+            if _ckan_results and _ckan_results.get("datasets"):
+                st.divider()
+                st.subheader("Discovered Government Datasets (data.gov)")
+                st.caption(f"{_ckan_results.get('datasets_found', 0)} datasets found for this market area.")
+                for _ds in _ckan_results["datasets"][:10]:
+                    st.markdown(f"- [{_ds.get('title', 'Untitled')}]({_ds.get('url', '#')}) ({_ds.get('format', 'N/A')})")
+                    if _ds.get("description"):
+                        st.caption(_ds["description"][:200])
+
+            # Show expanded data sections
+            st.divider()
+            st.subheader("Expanded Data Feeds")
+
+            _exp_cols = st.columns(3)
+
+            with _exp_cols[0]:
+                st.markdown("**County Business Patterns**")
+                _cbp = st.session_state.get("cbp_data", {})
+                if _cbp:
+                    st.metric("Total Establishments", f"{_cbp.get('total_establishments', 0):,}")
+                    st.metric("Retail Establishments", f"{_cbp.get('retail_establishments', 0):,}")
+                    st.metric("Food Service", f"{_cbp.get('food_service_establishments', 0):,}")
+                else:
+                    st.caption("Run analysis to populate.")
+
+            with _exp_cols[1]:
+                st.markdown("**Health & Wellness**")
+                _hd = st.session_state.get("health_data", {})
+                if _hd:
+                    if "obesity_pct" in _hd:
+                        st.metric("Obesity Rate", f"{_hd['obesity_pct']:.1f}%")
+                    if "physical_inactivity_pct" in _hd:
+                        st.metric("Physical Inactivity", f"{_hd['physical_inactivity_pct']:.1f}%")
+                    if "food_environment_index" in _hd:
+                        st.metric("Food Environment Index", f"{_hd['food_environment_index']:.1f}")
+                    if "uninsured_pct" in _hd:
+                        st.metric("Uninsured Rate", f"{_hd['uninsured_pct']:.1f}%")
+                else:
+                    st.caption("Run analysis to populate.")
+
+            with _exp_cols[2]:
+                st.markdown("**Macro Economic Context (FRED)**")
+                _fd = st.session_state.get("fred_data", {})
+                if _fd:
+                    for _fk, _fv in _fd.items():
+                        if isinstance(_fv, dict) and "value" in _fv:
+                            st.metric(_fk.replace("_", " ").title(), f"{_fv['value']}")
+                        elif isinstance(_fv, str):
+                            st.metric(_fk.replace("_", " ").title(), _fv)
+                else:
+                    st.caption("Add a FRED API key to enable.")
+
+            # SEC/FMP benchmarks
+            _sec = st.session_state.get("sec_benchmarks", [])
+            _fmp = st.session_state.get("fmp_benchmarks", [])
+            _benchmarks = _sec + _fmp
+            if _benchmarks:
+                st.divider()
+                st.subheader("Public Retailer Benchmarks")
+                _bm_df = pd.DataFrame(_benchmarks)
+                _display_cols = [c for c in ["name", "revenue", "net_income", "gross_margin",
+                                              "operating_margin", "total_stores", "year",
+                                              "companyName", "mktCap", "sector"] if c in _bm_df.columns]
+                if _display_cols:
+                    st.dataframe(_bm_df[_display_cols], use_container_width=True, hide_index=True)
+
+            # Data Commons
+            _dc = st.session_state.get("dc_data", {})
+            if _dc:
+                st.divider()
+                st.subheader("Data Commons Indicators")
+                _dc_cols = st.columns(min(len(_dc), 4))
+                for i, (_dk, _dv) in enumerate(_dc.items()):
+                    with _dc_cols[i % min(len(_dc), 4)]:
+                        _label = _dk.replace("_", " ").title()
+                        if isinstance(_dv, float):
+                            st.metric(_label, f"{_dv:,.1f}")
+                        else:
+                            st.metric(_label, str(_dv))
+
     else:
         # Landing page
         st.title("Gravity Consumer Model")
@@ -3649,9 +4011,10 @@ Divided by 365 (daily) or 52 (weekly).
         - **Scenario** — hypothetical new store impact simulation
 
         **Data sources (all free, no keys required):**
-        Census ACS (95 variables), OpenStreetMap, OSRM, BLS QCEW, 418-brand store size database
+        Census ACS (95 variables), Census CBP, OpenStreetMap, OSRM, BLS QCEW,
+        SEC EDGAR, HealthData.gov, data.gov, 418-brand store size database
 
-        **Optional:** Google Places API, Yelp Fusion API (keys in sidebar)
+        **Optional (free keys):** Google Places, Yelp Fusion, FRED, Data Commons, FMP
 
         **Coverage:** All 50 states, 3,200+ counties, any ZIP code.
 
