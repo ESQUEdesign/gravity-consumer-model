@@ -621,6 +621,95 @@ def compute_ensemble(model_results, origins_df, stores_df):
     }
 
 
+# ---------------------------------------------------------------------------
+# Revenue prediction model
+# ---------------------------------------------------------------------------
+
+# Annual per-capita retail spending by category (BLS Consumer Expenditure Survey)
+_CATEGORY_SPEND = {
+    "grocery": 4942, "convenience": 1500, "department": 2500,
+    "apparel": 1866, "electronics": 1200, "furniture": 2050,
+    "hardware": 1600, "food_specialty": 800, "general": 2000,
+    "variety": 1200, "liquor": 600, "beverages": 400, "mall": 3000,
+    "new": 2000,
+}
+_NATIONAL_MEDIAN_INCOME = 75_149  # 2023 ACS national median household income
+_INCOME_ELASTICITY = 0.5  # spending grows with income but sub-linearly
+
+# Spending propensity by price sensitivity
+_PRICE_SENS_MULT = {
+    "low": 1.30, "moderate": 1.00, "high": 0.75, "very high": 0.60,
+}
+# Visit frequency multiplier
+_FREQ_MULT = {"high": 1.20, "moderate": 1.00, "low": 0.80}
+
+
+def predict_revenue(origins_df, new_store_probs, category, psycho_df=None):
+    """Predict annual revenue for a new store based on gravity model
+    probabilities, demographics, and psychographic segments.
+
+    Returns dict with:
+      annual_revenue, monthly_revenue, revenue_per_sqft (if sqft known),
+      revenue_by_segment (DataFrame), confidence_low, confidence_high,
+      per_bg (DataFrame with per-block-group contribution)
+    """
+    base_spend = _CATEGORY_SPEND.get(category, 2000)
+    probs = new_store_probs.reindex(origins_df.index).fillna(0)
+
+    # Per-block-group revenue contribution
+    pop = origins_df["population"].fillna(0).astype(float)
+    income = origins_df["median_income"].fillna(_NATIONAL_MEDIAN_INCOME).astype(float)
+    income = income.clip(lower=10_000)  # floor for suppressed data
+
+    # Income multiplier: (local_income / national)^elasticity
+    income_mult = (income / _NATIONAL_MEDIAN_INCOME) ** _INCOME_ELASTICITY
+
+    # Base revenue per block group (before psychographic adjustment)
+    bg_revenue = probs * pop * base_spend * income_mult
+
+    # Psychographic spending propensity adjustment
+    seg_mult = pd.Series(1.0, index=origins_df.index)
+    if _PSYCHO_OK and psycho_df is not None and not psycho_df.empty:
+        aligned_psycho = psycho_df.reindex(origins_df.index)
+        for idx in origins_df.index:
+            seg_code = aligned_psycho.loc[idx, "segment_code"] if idx in aligned_psycho.index and pd.notna(aligned_psycho.loc[idx, "segment_code"]) else None
+            if seg_code and seg_code in SEGMENT_PROFILES:
+                cb = SEGMENT_PROFILES[seg_code].get("consumer_behavior", {})
+                ps = _PRICE_SENS_MULT.get(cb.get("price_sensitivity", "moderate"), 1.0)
+                fq = _FREQ_MULT.get(cb.get("shopping_frequency", "moderate"), 1.0)
+                seg_mult.loc[idx] = ps * fq
+
+    bg_revenue = bg_revenue * seg_mult
+
+    annual = float(bg_revenue.sum())
+
+    # Revenue by segment breakdown
+    rev_by_seg = None
+    if _PSYCHO_OK and psycho_df is not None and not psycho_df.empty:
+        aligned_psycho = psycho_df.reindex(origins_df.index)
+        bg_df = pd.DataFrame({
+            "revenue": bg_revenue,
+            "segment_name": aligned_psycho["segment_name"] if "segment_name" in aligned_psycho.columns else None,
+        })
+        bg_df = bg_df.dropna(subset=["segment_name"])
+        if not bg_df.empty:
+            rev_by_seg = bg_df.groupby("segment_name")["revenue"].sum().sort_values(ascending=False)
+            rev_by_seg = pd.DataFrame({
+                "segment": rev_by_seg.index,
+                "revenue": rev_by_seg.values,
+                "pct": (rev_by_seg.values / annual * 100) if annual > 0 else 0,
+            })
+
+    return {
+        "annual_revenue": annual,
+        "monthly_revenue": annual / 12,
+        "confidence_low": annual * 0.70,
+        "confidence_high": annual * 1.35,
+        "revenue_by_segment": rev_by_seg,
+        "bg_revenue": bg_revenue,
+    }
+
+
 def simulate_new_store(origins_df, stores_df, new_lat, new_lon, new_sqft,
                        alpha, lam, name="NEW STORE", category="general",
                        rating=0.0, price_level="moderate"):
@@ -662,11 +751,24 @@ def simulate_new_store(origins_df, stores_df, new_lat, new_lon, new_sqft,
     # Catchment analysis: top origins by probability for the new store
     new_probs = scenario["prob_df"]["new_store_scenario"] if "new_store_scenario" in scenario["prob_df"].columns else None
 
+    # Revenue prediction
+    revenue = None
+    if new_probs is not None:
+        psycho_df = None
+        try:
+            import streamlit as _st
+            psycho_df = _st.session_state.get("psycho_df")
+        except Exception:
+            pass
+        revenue = predict_revenue(origins_df, new_probs, category, psycho_df)
+        if revenue and new_sqft > 0:
+            revenue["revenue_per_sqft"] = revenue["annual_revenue"] / new_sqft
+
     return {
         "new_store_share": new_share, "new_store_demand": new_demand,
         "impact_df": impact_df,
         "hhi_baseline": baseline["hhi"], "hhi_scenario": scenario["hhi"],
-        "new_store_probs": new_probs,
+        "new_store_probs": new_probs, "revenue": revenue,
     }
 
 
@@ -1646,6 +1748,65 @@ def main():
                 c3.metric("HHI Change", _sf(scenario['hhi_scenario'], '.1f'),
                            delta=_sf(_safe_float(scenario['hhi_scenario']) - _safe_float(scenario['hhi_baseline']), '+.1f'))
                 c4.metric("Baseline HHI", _sf(scenario['hhi_baseline'], '.1f'))
+
+                # -- Revenue prediction --
+                rev = scenario.get("revenue")
+                if rev:
+                    st.divider()
+                    st.subheader("Revenue Forecast")
+                    st.caption(
+                        "Based on gravity model catchment, local income levels, "
+                        "and psychographic spending propensity"
+                    )
+                    r1, r2, r3, r4 = st.columns(4)
+                    r1.metric("Annual Revenue (est.)",
+                              f"${rev['annual_revenue']:,.0f}")
+                    r2.metric("Monthly Revenue (est.)",
+                              f"${rev['monthly_revenue']:,.0f}")
+                    if rev.get("revenue_per_sqft"):
+                        r3.metric("Revenue / Sq Ft",
+                                  f"${rev['revenue_per_sqft']:,.0f}")
+                    else:
+                        r3.metric("Revenue / Sq Ft", "N/A")
+                    r4.metric("Confidence Range",
+                              f"${rev['confidence_low']:,.0f} – ${rev['confidence_high']:,.0f}")
+
+                    # Revenue by segment breakdown
+                    import plotly.express as px
+                    rev_seg = rev.get("revenue_by_segment")
+                    if rev_seg is not None and not rev_seg.empty:
+                        col_rev, col_pie = st.columns(2)
+                        with col_rev:
+                            rev_seg_sorted = rev_seg.sort_values("revenue", ascending=True)
+                            fig_rev = px.bar(rev_seg_sorted, x="revenue", y="segment",
+                                             orientation="h", color="revenue",
+                                             color_continuous_scale="Greens",
+                                             title="Revenue by Consumer Segment")
+                            fig_rev.update_layout(height=350, coloraxis_showscale=False,
+                                                  xaxis_tickprefix="$", xaxis_tickformat=",.0f",
+                                                  yaxis_title=None,
+                                                  margin=dict(l=0, r=20, t=40, b=20))
+                            st.plotly_chart(fig_rev, use_container_width=True)
+
+                        with col_pie:
+                            fig_pie = px.pie(rev_seg, values="revenue", names="segment",
+                                             title="Revenue Share by Segment", hole=0.4)
+                            fig_pie.update_layout(height=350,
+                                                  margin=dict(l=20, r=20, t=40, b=20))
+                            st.plotly_chart(fig_pie, use_container_width=True)
+
+                    # Revenue drivers explanation
+                    with st.expander("Revenue Model Details"):
+                        st.markdown(f"""
+**Model inputs:**
+- **Category baseline**: ${_CATEGORY_SPEND.get(new_category, 2000):,}/year per capita ({new_category})
+- **Income adjustment**: local median income vs. national (${_NATIONAL_MEDIAN_INCOME:,}), elasticity {_INCOME_ELASTICITY}
+- **Psychographic multiplier**: spending propensity × visit frequency by lifestyle segment
+- **Gravity probability**: Huff model P(choose this store) per block group
+
+**Confidence range**: 70%–135% of point estimate to account for model uncertainty,
+local competitive dynamics, and seasonal variation.
+                        """)
 
                 st.divider()
                 import plotly.express as px
