@@ -128,8 +128,11 @@ _CATEGORY_MAP = {
     "alcohol": "liquor", "beverages": "beverages",
 }
 
-OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
-API_TIMEOUT = 60
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+API_TIMEOUT = 120
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +262,16 @@ def fetch_osm_stores(bbox: tuple) -> pd.DataFrame:
     (node["shop"]({south},{west},{north},{east}););
     out body 500;
     """
-    resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=API_TIMEOUT)
+    resp = None
+    for url in OVERPASS_URLS:
+        try:
+            resp = requests.post(url, data={"data": query}, timeout=API_TIMEOUT)
+            resp.raise_for_status()
+            break
+        except Exception:
+            continue
+    if resp is None:
+        raise RuntimeError("All Overpass API servers timed out. Try a smaller county or increase radius.")
     resp.raise_for_status()
     stores = []
     for elem in resp.json().get("elements", []):
