@@ -111,7 +111,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-_APP_VERSION = "1.3.0"  # consumer filters
+_APP_VERSION = "1.4.0"  # actionable insights
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -618,6 +618,239 @@ def compute_ensemble(model_results, origins_df, stores_df):
         "prob_df": ensemble_prob, "store_results": store_results,
         "hhi": hhi, "top5_concentration": top5,
         "models_used": names, "n_models": len(names),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Market intelligence engine
+# ---------------------------------------------------------------------------
+
+# National avg stores per 10K people by category (ICSC / Census CBP benchmarks)
+_STORES_PER_10K = {
+    "grocery": 2.5, "convenience": 5.0, "department": 0.4,
+    "apparel": 3.0, "electronics": 0.8, "furniture": 1.2,
+    "hardware": 1.5, "food_specialty": 2.0, "general": 2.0,
+    "variety": 1.8, "liquor": 1.5, "beverages": 1.0, "mall": 0.15,
+}
+
+# Avg annual rent per sqft by category (CBRE / CoStar national avg)
+_AVG_RENT_SQFT = {
+    "grocery": 14, "convenience": 22, "department": 10,
+    "apparel": 28, "electronics": 24, "furniture": 12,
+    "hardware": 12, "food_specialty": 30, "general": 16,
+    "variety": 14, "liquor": 20, "beverages": 25, "mall": 35,
+}
+
+# Marketing channel recommendations by segment behavior
+_MARKETING_CHANNELS = {
+    "in-store": ["in-store signage", "loyalty programs", "local newspaper", "direct mail"],
+    "online": ["social media ads", "email marketing", "influencer partnerships", "SEO/SEM"],
+    "omnichannel": ["social media", "email + in-store promos", "mobile app", "click-and-collect"],
+}
+
+_PRICE_MESSAGING = {
+    "low": "Premium quality, curated experiences, exclusivity",
+    "moderate": "Everyday value, trusted brands, family-friendly",
+    "high": "Deep discounts, BOGO, clearance events, price-match guarantees",
+    "very high": "Dollar deals, bulk savings, essential value packs",
+}
+
+
+def compute_site_viability(total_pop, avg_income, n_stores, category,
+                           hhi, fit_score, pop_3mi):
+    """Compute 0-100 site viability score with component breakdown."""
+    scores = {}
+
+    # 1. Population density (0-20): is there enough demand?
+    if pop_3mi >= 50_000:
+        scores["population"] = 20
+    elif pop_3mi >= 20_000:
+        scores["population"] = 15
+    elif pop_3mi >= 10_000:
+        scores["population"] = 10
+    elif pop_3mi >= 5_000:
+        scores["population"] = 6
+    else:
+        scores["population"] = 3
+
+    # 2. Income fit (0-20): can they afford the category?
+    cat_spend = _CATEGORY_SPEND.get(category, 2000)
+    income_ratio = avg_income / _NATIONAL_MEDIAN_INCOME if avg_income > 0 else 0.5
+    if income_ratio >= 1.2:
+        scores["income"] = 20
+    elif income_ratio >= 0.9:
+        scores["income"] = 16
+    elif income_ratio >= 0.7:
+        scores["income"] = 10
+    else:
+        scores["income"] = 5
+
+    # 3. Competition headroom (0-20): is the market oversaturated?
+    expected = _STORES_PER_10K.get(category, 2.0) * total_pop / 10_000
+    same_cat = n_stores  # count of same-category stores
+    saturation = same_cat / expected if expected > 0 else 2.0
+    if saturation <= 0.5:
+        scores["competition"] = 20  # very underserved
+    elif saturation <= 0.8:
+        scores["competition"] = 16
+    elif saturation <= 1.2:
+        scores["competition"] = 10  # balanced
+    elif saturation <= 1.5:
+        scores["competition"] = 5
+    else:
+        scores["competition"] = 2   # oversaturated
+
+    # 4. Category-audience fit (0-20)
+    if fit_score is not None:
+        scores["category_fit"] = min(20, int(fit_score / 5))
+    else:
+        scores["category_fit"] = 10  # neutral if unknown
+
+    # 5. Market health (0-20): competitive market is better
+    if hhi < 15:
+        scores["market_health"] = 18  # healthy competition
+    elif hhi < 25:
+        scores["market_health"] = 12
+    elif hhi < 40:
+        scores["market_health"] = 8
+    else:
+        scores["market_health"] = 4  # monopoly risk
+
+    total = sum(scores.values())
+
+    if total >= 80:
+        grade, verdict = "A", "Strong opportunity"
+    elif total >= 65:
+        grade, verdict = "B", "Good opportunity with manageable risks"
+    elif total >= 50:
+        grade, verdict = "C", "Moderate opportunity — proceed with caution"
+    elif total >= 35:
+        grade, verdict = "D", "Weak opportunity — significant headwinds"
+    else:
+        grade, verdict = "F", "Not recommended — critical issues"
+
+    return {
+        "total": total, "grade": grade, "verdict": verdict,
+        "components": scores, "saturation": saturation,
+    }
+
+
+def compute_market_gaps(stores_df, total_pop):
+    """Identify underserved and oversaturated categories."""
+    gaps = []
+    cat_counts = stores_df["category"].value_counts()
+    for cat, benchmark in _STORES_PER_10K.items():
+        expected = benchmark * total_pop / 10_000
+        actual = cat_counts.get(cat, 0)
+        ratio = actual / expected if expected > 0 else 0
+        spend = _CATEGORY_SPEND.get(cat, 2000)
+        tam = total_pop * spend
+        gaps.append({
+            "category": cat, "actual_stores": actual,
+            "expected_stores": round(expected, 1),
+            "saturation": round(ratio, 2),
+            "tam": tam,
+            "status": "Underserved" if ratio < 0.7 else "Oversaturated" if ratio > 1.3 else "Balanced",
+        })
+    return pd.DataFrame(gaps).sort_values("saturation")
+
+
+def generate_executive_summary(market_label, total_pop, avg_income, n_stores,
+                               hhi, dom_segment, dom_pct, gap_df,
+                               viability):
+    """Auto-generate executive summary for market analysis."""
+    lines = []
+    grade = viability["grade"]
+    verdict = viability["verdict"]
+    score = viability["total"]
+
+    lines.append(f"**Market Grade: {grade} ({score}/100)** — {verdict}.")
+
+    lines.append(
+        f"{market_label} has a population of {total_pop:,} with a "
+        f"median income of ${avg_income:,.0f} and {n_stores:,} retail locations."
+    )
+
+    if hhi < 15:
+        lines.append("The market is highly competitive with no dominant players.")
+    elif hhi < 25:
+        lines.append("The market is moderately concentrated — a few chains hold significant share.")
+    else:
+        lines.append("The market is highly concentrated — dominated by a small number of retailers.")
+
+    if dom_segment and dom_pct:
+        lines.append(
+            f"The primary consumer segment is **{dom_segment}** ({dom_pct:.0f}% of population)."
+        )
+
+    # Top opportunities
+    if gap_df is not None and not gap_df.empty:
+        underserved = gap_df[gap_df["status"] == "Underserved"].head(3)
+        if not underserved.empty:
+            cats = ", ".join(underserved["category"].tolist())
+            lines.append(f"**Opportunity**: {cats} {'categories are' if len(underserved) > 1 else 'category is'} underserved relative to population.")
+        oversat = gap_df[gap_df["status"] == "Oversaturated"].head(2)
+        if not oversat.empty:
+            cats = ", ".join(oversat["category"].tolist())
+            lines.append(f"**Caution**: {cats} {'are' if len(oversat) > 1 else 'is'} oversaturated.")
+
+    return " ".join(lines)
+
+
+def build_marketing_playbook(segment_code):
+    """Build actionable marketing recommendations for a segment."""
+    if segment_code not in SEGMENT_PROFILES:
+        return None
+    prof = SEGMENT_PROFILES[segment_code]
+    cb = prof.get("consumer_behavior", {})
+    channel_pref = cb.get("channel_preference", "in-store")
+    price_sens = cb.get("price_sensitivity", "moderate")
+    channels = _MARKETING_CHANNELS.get(channel_pref, _MARKETING_CHANNELS["in-store"])
+    messaging = _PRICE_MESSAGING.get(price_sens, _PRICE_MESSAGING["moderate"])
+    freq = cb.get("shopping_frequency", "moderate")
+    loyalty = cb.get("brand_loyalty", "moderate")
+
+    promo_cadence = {
+        "high": "Weekly promotions and flash sales",
+        "moderate": "Bi-weekly or monthly campaigns",
+        "low": "Seasonal events and milestone offers",
+    }
+
+    loyalty_strategy = {
+        "very high": "Reinforce with loyalty rewards — they rarely switch. Focus on retention.",
+        "high": "Loyalty programs with tiered rewards. They respond to exclusive member benefits.",
+        "moderate": "Mix of loyalty perks and competitive pricing. They'll compare but prefer convenience.",
+        "low": "Price and novelty drive decisions. Use limited-time offers and trend-driven assortment.",
+    }
+
+    return {
+        "segment_name": prof["name"],
+        "description": prof["description"],
+        "who_they_are": prof["description"].split(".")[0] + ".",
+        "channels": channels,
+        "messaging": messaging,
+        "promo_cadence": promo_cadence.get(freq, promo_cadence["moderate"]),
+        "loyalty_strategy": loyalty_strategy.get(loyalty, loyalty_strategy["moderate"]),
+        "retail_affinity": cb.get("retail_affinity", []),
+        "price_sensitivity": price_sens,
+        "shopping_frequency": freq,
+        "channel_preference": channel_pref,
+    }
+
+
+def compute_supportable_rent(annual_revenue, sqft, category):
+    """Calculate max supportable rent based on industry occupancy ratios."""
+    if annual_revenue <= 0 or sqft <= 0:
+        return None
+    # Retail occupancy cost should be 5-10% of revenue (ICSC benchmark)
+    rent_low = annual_revenue * 0.05 / sqft
+    rent_mid = annual_revenue * 0.08 / sqft
+    rent_high = annual_revenue * 0.10 / sqft
+    market_avg = _AVG_RENT_SQFT.get(category, 16)
+    return {
+        "rent_low": rent_low, "rent_mid": rent_mid, "rent_high": rent_high,
+        "market_avg": market_avg,
+        "can_afford_market": rent_mid >= market_avg,
     }
 
 
@@ -1389,6 +1622,39 @@ def main():
         c4.metric("Avg Income", f"${_sf(avg_income, ',.0f')}" if _safe_float(avg_income) > 0 else "N/A")
         c5.metric("HHI", _sf(active_results['hhi'], '.0f'))
 
+        # ── Pre-compute market intelligence ─────────────────────────────
+        # Dominant psychographic segment
+        _ov_dom_seg, _ov_dom_pct = None, None
+        psycho_df_ov = st.session_state.get("psycho_df")
+        if _PSYCHO_OK and psycho_df_ov is not None and "segment_name" in psycho_df_ov.columns:
+            vp = psycho_df_ov[psycho_df_ov["segment_name"].notna()]
+            if not vp.empty:
+                pop_by_s = vp.groupby("segment_name")["population"].sum()
+                if pop_by_s.sum() > 0:
+                    _ov_dom_seg = pop_by_s.idxmax()
+                    _ov_dom_pct = pop_by_s.max() / pop_by_s.sum() * 100
+
+        # Market gaps
+        gap_df = compute_market_gaps(stores_df, total_pop)
+
+        # Site viability (use county center for 3mi pop estimate)
+        center_lat_v = (bbox[0] + bbox[2]) / 2
+        center_lon_v = (bbox[1] + bbox[3]) / 2
+        _rings_ov = _compute_distance_rings(center_lat_v, center_lon_v, origins_df)
+        pop_3mi = _rings_ov.get("3mi", {}).get("population", total_pop)
+        n_same_cat_all = len(stores_df)  # full market store count for overview
+
+        viability = compute_site_viability(
+            total_pop, _safe_float(avg_income), n_same_cat_all,
+            "general", active_results["hhi"], None, pop_3mi,
+        )
+
+        # Executive summary
+        exec_summary = generate_executive_summary(
+            market_label, total_pop, _safe_float(avg_income), len(stores_df),
+            active_results["hhi"], _ov_dom_seg, _ov_dom_pct, gap_df, viability,
+        )
+
         # ── Tabs ─────────────────────────────────────────────────────────
         tab_overview, tab_demo, tab_psycho, tab_competition, tab_scenario = st.tabs([
             "Market Overview", "Demographics", "Psychographics", "Competition", "Scenario",
@@ -1396,6 +1662,77 @@ def main():
 
         # ── Tab 1: Market Overview ───────────────────────────────────────
         with tab_overview:
+            import plotly.express as px
+
+            # Executive summary
+            st.info(exec_summary)
+
+            # Market vitals row
+            v1, v2, v3, v4, v5, v6 = st.columns(6)
+            grade_colors = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🟠", "F": "🔴"}
+            v1.metric("Market Grade", f"{grade_colors.get(viability['grade'], '')} {viability['grade']}")
+            v2.metric("Score", f"{viability['total']}/100")
+
+            # Total addressable market
+            total_tam = sum(total_pop * _CATEGORY_SPEND.get(c, 2000)
+                            for c in stores_df["category"].unique())
+            v3.metric("Total TAM", f"${total_tam / 1e6:,.0f}M")
+            v4.metric("Stores / 10K pop",
+                       f"{len(stores_df) / (total_pop / 10_000):.1f}" if total_pop > 0 else "N/A")
+            v5.metric("Avg Spend Power",
+                       f"${_safe_float(avg_income) * total_hh / 1e6:,.0f}M" if total_hh > 0 else "N/A")
+            v6.metric("Competition Level",
+                       "Low" if active_results["hhi"] < 15 else "Moderate" if active_results["hhi"] < 25 else "High")
+
+            st.divider()
+
+            # Market opportunity gaps
+            st.subheader("Market Opportunity Gaps")
+            st.caption("Categories relative to national benchmarks (stores per 10K population)")
+            col_gap, col_tam = st.columns(2)
+            with col_gap:
+                gap_chart = gap_df.copy()
+                gap_chart["color"] = gap_chart["status"].map(
+                    {"Underserved": "#4CAF50", "Balanced": "#FF9800", "Oversaturated": "#F44336"})
+                fig_gap = px.bar(gap_chart, x="category", y="saturation",
+                                 color="status",
+                                 color_discrete_map={"Underserved": "#4CAF50",
+                                                     "Balanced": "#FF9800",
+                                                     "Oversaturated": "#F44336"},
+                                 title="Category Saturation Index")
+                fig_gap.add_hline(y=1.0, line_dash="dash", line_color="gray",
+                                  annotation_text="Market equilibrium")
+                fig_gap.update_layout(height=350, xaxis_tickangle=-35,
+                                      yaxis_title="Saturation (1.0 = balanced)",
+                                      margin=dict(l=0, r=20, t=40, b=80))
+                st.plotly_chart(fig_gap, use_container_width=True)
+
+            with col_tam:
+                # TAM by category
+                tam_df = gap_df[gap_df["tam"] > 0].sort_values("tam", ascending=True)
+                fig_tam = px.bar(tam_df, x="tam", y="category", orientation="h",
+                                  title="Total Addressable Market by Category",
+                                  color="status",
+                                  color_discrete_map={"Underserved": "#4CAF50",
+                                                      "Balanced": "#FF9800",
+                                                      "Oversaturated": "#F44336"})
+                fig_tam.update_layout(height=350, xaxis_tickprefix="$",
+                                      xaxis_tickformat=",.0s", yaxis_title=None,
+                                      margin=dict(l=0, r=20, t=40, b=20))
+                st.plotly_chart(fig_tam, use_container_width=True)
+
+            # Underserved callout
+            underserved = gap_df[gap_df["status"] == "Underserved"]
+            if not underserved.empty:
+                st.success(
+                    f"**Opportunities**: "
+                    + ", ".join(f"{r['category']} ({r['actual_stores']} stores vs {r['expected_stores']:.0f} expected)"
+                               for _, r in underserved.iterrows())
+                )
+
+            st.divider()
+
+            # Top 25 stores + concentration (existing)
             col1, col2 = st.columns([2, 1])
             with col1:
                 st.subheader("Top 25 Stores")
@@ -1404,7 +1741,6 @@ def main():
                 top25["share_pct"] = top25["share"].apply(lambda x: _sf(x, '.4%'))
                 top25["demand_fmt"] = top25["demand"].apply(lambda x: _sf(x, ',.0f'))
 
-                # Add enrichment columns
                 for col_name in ["avg_rating", "square_footage", "sqft_source"]:
                     if col_name in stores_df.columns and top25.index.isin(stores_df.index).any():
                         top25[col_name] = stores_df.loc[top25.index, col_name]
@@ -1443,9 +1779,6 @@ def main():
                 st.subheader("Categories")
                 for cat, count in stores_df["category"].value_counts().head(8).items():
                     st.text(f"{cat:<20s} {count:>4}")
-
-            # Charts row
-            import plotly.express as px
 
             c1, c2 = st.columns(2)
             with c1:
@@ -1670,19 +2003,25 @@ def main():
                                 break
 
                     if seg_code and seg_code in SEGMENT_PROFILES:
-                        profile = SEGMENT_PROFILES[seg_code]
-                        pc1, pc2 = st.columns([1, 1])
-                        with pc1:
-                            st.markdown(f"**{profile['name']}** (`{seg_code}`)")
-                            st.markdown(profile["description"])
-                        with pc2:
-                            behavior = profile.get("consumer_behavior", {})
-                            st.markdown("**Consumer Behavior**")
-                            st.markdown(f"- **Retail Affinity:** {', '.join(behavior.get('retail_affinity', []))}")
-                            st.markdown(f"- **Price Sensitivity:** {behavior.get('price_sensitivity', 'N/A')}")
-                            st.markdown(f"- **Brand Loyalty:** {behavior.get('brand_loyalty', 'N/A')}")
-                            st.markdown(f"- **Shopping Frequency:** {behavior.get('shopping_frequency', 'N/A')}")
-                            st.markdown(f"- **Channel Preference:** {behavior.get('channel_preference', 'N/A')}")
+                        playbook = build_marketing_playbook(seg_code)
+                        if playbook:
+                            pc1, pc2 = st.columns([1, 1])
+                            with pc1:
+                                st.markdown(f"### {playbook['segment_name']}")
+                                st.markdown(playbook["description"])
+                                st.markdown("**Shopping Profile**")
+                                st.markdown(f"- Price sensitivity: **{playbook['price_sensitivity']}**")
+                                st.markdown(f"- Shopping frequency: **{playbook['shopping_frequency']}**")
+                                st.markdown(f"- Channel preference: **{playbook['channel_preference']}**")
+                                st.markdown(f"- Retail affinity: {', '.join(playbook['retail_affinity'])}")
+                            with pc2:
+                                st.markdown("### Marketing Playbook")
+                                st.markdown("**How to reach them:**")
+                                for ch in playbook["channels"]:
+                                    st.markdown(f"- {ch}")
+                                st.markdown(f"**Messaging strategy:** {playbook['messaging']}")
+                                st.markdown(f"**Promotion cadence:** {playbook['promo_cadence']}")
+                                st.markdown(f"**Loyalty approach:** {playbook['loyalty_strategy']}")
 
                     # Row 3: Summary table
                     st.divider()
@@ -2309,6 +2648,46 @@ def main():
                                     st.text(f"  Retail affinity: {', '.join(cb.get('retail_affinity', []))}")
                                     st.text(f"  Price sensitivity: {cb.get('price_sensitivity', 'N/A')}")
                                     st.text(f"  Channel: {cb.get('channel_preference', 'N/A')}")
+
+                # ── Supportable rent & trade area penetration ────────
+                if rev and rev.get("annual_revenue", 0) > 0:
+                    st.divider()
+                    st.subheader("Lease Economics")
+                    rent_data = compute_supportable_rent(
+                        rev["annual_revenue"], float(new_sqft), new_category)
+                    if rent_data:
+                        le1, le2, le3, le4 = st.columns(4)
+                        le1.metric("Max Rent (conservative)",
+                                   f"${rent_data['rent_low']:,.0f}/sqft/yr")
+                        le2.metric("Target Rent (8% ratio)",
+                                   f"${rent_data['rent_mid']:,.0f}/sqft/yr")
+                        le3.metric("Market Avg Rent",
+                                   f"${rent_data['market_avg']:,.0f}/sqft/yr")
+                        if rent_data["can_afford_market"]:
+                            le4.metric("Rent Verdict", "Feasible")
+                            st.success(
+                                f"Projected revenue supports market-rate rent. "
+                                f"Occupancy cost at ${rent_data['rent_mid']:,.0f}/sqft = "
+                                f"{rent_data['rent_mid'] * float(new_sqft) / rev['annual_revenue'] * 100:.1f}% of revenue."
+                            )
+                        else:
+                            le4.metric("Rent Verdict", "Challenging")
+                            st.warning(
+                                f"Market rent (${rent_data['market_avg']}/sqft) exceeds "
+                                f"recommended occupancy ratio. Negotiate below "
+                                f"${rent_data['rent_mid']:,.0f}/sqft or increase store volume."
+                            )
+
+                    # Trade area penetration
+                    sc_rings = _compute_distance_rings(new_lat, new_lon, origins_df)
+                    pop_3 = sc_rings.get("3mi", {}).get("population", 0)
+                    if pop_3 > 0 and rev.get("annual_revenue", 0) > 0:
+                        basket = _AVG_BASKET.get(new_category, 35)
+                        annual_txns = rev["annual_revenue"] / basket if basket > 0 else 0
+                        penetration = annual_txns / (pop_3 * 52) * 100 if pop_3 > 0 else 0
+                        st.metric("Trade Area Penetration (3mi)",
+                                  f"{penetration:.1f}% of population/week",
+                                  help="% of 3-mile population visiting weekly")
 
                 # ── Revenue model details (collapsed) ─────────────────
                 if rev:
