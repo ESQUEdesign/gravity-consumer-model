@@ -171,11 +171,21 @@ _esque_template = go.layout.Template(
     layout=go.Layout(
         paper_bgcolor="#0F0F0D",
         plot_bgcolor="#181815",
-        font=dict(family="Georgia, serif", color="#EDE8E0"),
+        font=dict(family="DM Sans, sans-serif", color="#EDE8E0", size=13),
+        title=dict(font=dict(family="Cormorant Garamond, Georgia, serif", size=24, color="#F7F3EC")),
         colorway=["#C4A05A", "#7A8470", "#B85C3A", "#A89F92",
                    "#D9BC81", "#A3AE9C", "#8F7038", "#6B6A62"],
-        xaxis=dict(gridcolor="#363630", zerolinecolor="#363630"),
-        yaxis=dict(gridcolor="#363630", zerolinecolor="#363630"),
+        xaxis=dict(
+            gridcolor="rgba(54,54,48,0.6)", zerolinecolor="#363630",
+            title=dict(font=dict(family="Raleway, sans-serif", size=11, color="#A89F92")),
+            tickfont=dict(family="DM Sans, sans-serif", size=11, color="#6B6A62"),
+        ),
+        yaxis=dict(
+            gridcolor="rgba(54,54,48,0.6)", zerolinecolor="#363630",
+            title=dict(font=dict(family="Raleway, sans-serif", size=11, color="#A89F92")),
+            tickfont=dict(family="DM Sans, sans-serif", size=11, color="#6B6A62"),
+        ),
+        legend=dict(font=dict(family="Raleway, sans-serif", size=11, color="#A89F92")),
     )
 )
 pio.templates["esque"] = _esque_template
@@ -1880,110 +1890,361 @@ def render_origin_heatmap(prob_df, origins_df, store_id, center_lat, center_lon)
 def main():
     st.markdown("""
     <style>
-    /* ── Esque Design System ── */
+    /* ── Esque Design System ─────────────────────────────────── */
+    @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500&family=Raleway:wght@200;300;400;500;600;700&family=DM+Sans:wght@300;400;500&display=swap');
+
     :root {
-        --obsidian: #0F0F0D; --obsidian-soft: #181815; --obsidian-mid: #252520;
-        --obsidian-light: #363630; --stone: #6B6A62; --sand: #A89F92;
-        --ivory: #EDE8E0; --ivory-warm: #F7F3EC;
-        --gold: #C4A05A; --gold-light: #D9BC81; --gold-dark: #8F7038;
-        --sage: #7A8470; --sage-light: #A3AE9C; --ember: #B85C3A;
+        --obsidian: #0F0F0D;
+        --obsidian-soft: #181815;
+        --obsidian-mid: #252520;
+        --obsidian-light: #363630;
+        --stone: #6B6A62;
+        --sand: #A89F92;
+        --ivory: #EDE8E0;
+        --ivory-warm: #F7F3EC;
+        --gold: #C4A05A;
+        --gold-light: #D9BC81;
+        --gold-dark: #8F7038;
+        --sage: #7A8470;
+        --sage-light: #A3AE9C;
+        --ember: #B85C3A;
+        --font-display: 'Cormorant Garamond', Georgia, serif;
+        --font-ui: 'Raleway', sans-serif;
+        --font-body: 'DM Sans', sans-serif;
+        --divider: 1px solid rgba(168,159,146,0.18);
+        --radius: 3px;
+        --radius-lg: 6px;
     }
 
-    .block-container { padding-top: 1rem; }
+    /* ── Reset & Base ── */
+    .block-container { padding-top: 1.5rem; }
 
-    /* Typography */
     html, body, [class*="css"] {
-        font-family: Georgia, Garamond, serif;
-        color: #EDE8E0;
+        font-family: var(--font-body);
+        font-size: 15px;
+        line-height: 1.7;
+        color: var(--ivory);
+        -webkit-font-smoothing: antialiased;
     }
-    h1, h2, h3, h4, h5, h6,
-    [data-testid="stSidebarNav"] span,
-    .stTabs [data-baseweb="tab"] {
-        font-family: 'Trebuchet MS', Arial, sans-serif;
-        color: #EDE8E0;
+
+    p, li, span, label {
+        font-family: var(--font-body);
+        color: var(--ivory);
     }
-    p, li, span, label { color: #EDE8E0; }
 
-    /* Background */
-    .stApp, [data-testid="stAppViewContainer"] { background-color: #0F0F0D; }
-    [data-testid="stSidebar"] { background-color: #181815; }
-    [data-testid="stHeader"] { background-color: #0F0F0D; }
+    /* ── Headings: Cormorant Garamond ── */
+    h1 {
+        font-family: var(--font-display) !important;
+        font-weight: 300 !important;
+        line-height: 1.05 !important;
+        letter-spacing: -0.01em !important;
+        color: var(--ivory-warm) !important;
+        font-size: clamp(36px, 4vw, 56px) !important;
+    }
+    h2 {
+        font-family: var(--font-display) !important;
+        font-weight: 400 !important;
+        line-height: 1.1 !important;
+        color: var(--ivory-warm) !important;
+        font-size: clamp(28px, 3vw, 42px) !important;
+    }
+    h3 {
+        font-family: var(--font-display) !important;
+        font-weight: 500 !important;
+        line-height: 1.2 !important;
+        color: var(--ivory) !important;
+        font-size: clamp(22px, 2.4vw, 32px) !important;
+    }
+    h4, h5, h6 {
+        font-family: var(--font-ui) !important;
+        font-weight: 500 !important;
+        letter-spacing: 0.08em !important;
+        color: var(--sand) !important;
+    }
 
-    /* Metrics */
-    [data-testid="stMetricValue"] { font-size: 1.8rem; color: #EDE8E0; }
-    [data-testid="stMetricLabel"] { font-size: 0.85rem; color: #A89F92; }
-    [data-testid="stMetricDelta"] svg { fill: #7A8470; }
+    /* ── Backgrounds ── */
+    .stApp, [data-testid="stAppViewContainer"] { background-color: var(--obsidian); }
+    [data-testid="stSidebar"] { background-color: var(--obsidian-soft); }
+    [data-testid="stHeader"] { background-color: var(--obsidian); }
 
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] { border-bottom: 1px solid rgba(168,159,146,0.18); }
+    /* ── Sidebar ── */
+    [data-testid="stSidebar"] label {
+        font-family: var(--font-ui);
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--sand);
+    }
+    [data-testid="stSidebar"] .stMarkdown p {
+        font-family: var(--font-body);
+        font-size: 13px;
+        color: var(--sand);
+    }
+    [data-testid="stSidebar"] h1 {
+        font-family: var(--font-ui) !important;
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.28em !important;
+        text-transform: uppercase !important;
+        color: var(--gold) !important;
+    }
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
+        font-family: var(--font-ui) !important;
+        font-size: 10px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.22em !important;
+        text-transform: uppercase !important;
+        color: var(--gold) !important;
+        margin-top: 1.2rem !important;
+        margin-bottom: 0.6rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stCaption"] {
+        font-family: var(--font-body);
+        font-size: 12px;
+        color: var(--stone);
+        letter-spacing: 0.04em;
+    }
+
+    /* ── Metrics ── */
+    [data-testid="stMetricValue"] {
+        font-family: var(--font-display) !important;
+        font-size: 2rem !important;
+        font-weight: 300 !important;
+        color: var(--ivory-warm) !important;
+        line-height: 1.1 !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-family: var(--font-ui) !important;
+        font-size: 10px !important;
+        font-weight: 500 !important;
+        letter-spacing: 0.18em !important;
+        text-transform: uppercase !important;
+        color: var(--stone) !important;
+    }
+    [data-testid="stMetricDelta"] {
+        font-family: var(--font-body) !important;
+        font-size: 12px !important;
+    }
+    [data-testid="stMetricDelta"] svg { fill: var(--sage); }
+
+    /* ── Tabs ── */
+    .stTabs [data-baseweb="tab-list"] {
+        border-bottom: var(--divider);
+        gap: 0;
+    }
     .stTabs [data-baseweb="tab"] {
-        color: #6B6A62; background-color: transparent;
-        border-bottom: 2px solid transparent; padding: 0.5rem 1rem;
+        font-family: var(--font-ui);
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--stone);
+        background-color: transparent;
+        border-bottom: 2px solid transparent;
+        padding: 0.6rem 1.2rem;
+        transition: color 0.25s, border-color 0.25s;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        color: var(--sand);
     }
     .stTabs [aria-selected="true"] {
-        color: #C4A05A !important;
-        border-bottom: 2px solid #C4A05A !important;
+        color: var(--gold) !important;
+        border-bottom: 2px solid var(--gold) !important;
         background-color: transparent !important;
+        font-weight: 600 !important;
     }
 
-    /* Buttons */
+    /* ── Buttons ── */
     .stButton > button {
-        background-color: #C4A05A; color: #0F0F0D;
-        border: none; border-radius: 3px;
-        font-family: 'Trebuchet MS', Arial, sans-serif;
+        font-family: var(--font-ui);
+        font-size: 11px;
         font-weight: 600;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        background-color: var(--gold);
+        color: var(--obsidian);
+        border: none;
+        border-radius: var(--radius);
+        padding: 0.55rem 1.4rem;
+        transition: background-color 0.25s, transform 0.15s;
     }
     .stButton > button:hover {
-        background-color: #D9BC81; color: #0F0F0D;
+        background-color: var(--gold-light);
+        color: var(--obsidian);
+        transform: translateY(-1px);
+    }
+    .stButton > button:active {
+        transform: translateY(0);
     }
 
-    /* Inputs & selects */
+    /* ── Inputs & Selects ── */
     [data-testid="stSelectbox"] > div > div,
     [data-testid="stMultiSelect"] > div > div,
     .stNumberInput > div > div > input,
     .stTextInput > div > div > input,
     .stSlider [data-baseweb="slider"] {
-        background-color: #252520; border-color: #363630; color: #EDE8E0;
+        font-family: var(--font-body);
+        font-size: 13px;
+        background-color: var(--obsidian-mid);
+        border-color: var(--obsidian-light);
+        color: var(--ivory);
+        border-radius: var(--radius);
     }
-    [data-baseweb="select"] { background-color: #252520; }
-    [data-baseweb="select"] * { color: #EDE8E0 !important; }
+    [data-baseweb="select"] {
+        font-family: var(--font-body);
+        background-color: var(--obsidian-mid);
+    }
+    [data-baseweb="select"] * { color: var(--ivory) !important; }
+    [data-baseweb="input"] {
+        font-family: var(--font-body);
+        background-color: var(--obsidian-mid) !important;
+    }
 
-    /* Tables */
+    /* ── Tables ── */
     [data-testid="stTable"] table,
-    .stDataFrame table { background-color: #181815; color: #EDE8E0; }
+    .stDataFrame table {
+        font-family: var(--font-body);
+        font-size: 13px;
+        background-color: var(--obsidian-soft);
+        color: var(--ivory);
+    }
     [data-testid="stTable"] th,
     .stDataFrame th {
-        background-color: #252520; color: #C4A05A;
-        border-bottom: 1px solid #363630;
+        font-family: var(--font-ui) !important;
+        font-size: 10px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.18em !important;
+        text-transform: uppercase !important;
+        background-color: var(--obsidian-mid);
+        color: var(--gold) !important;
+        border-bottom: 1px solid var(--obsidian-light);
+        padding: 12px 16px !important;
     }
     [data-testid="stTable"] td,
-    .stDataFrame td { border-bottom: 1px solid rgba(168,159,146,0.12); }
+    .stDataFrame td {
+        border-bottom: 1px solid rgba(168,159,146,0.10);
+        padding: 10px 16px !important;
+        color: var(--sand);
+    }
     [data-testid="stTable"] tr:nth-child(even) td,
-    .stDataFrame tr:nth-child(even) td { background-color: #252520; }
+    .stDataFrame tr:nth-child(even) td {
+        background-color: rgba(37,37,32,0.5);
+    }
 
-    /* Expanders */
-    [data-testid="stExpander"] { background-color: #181815; border: 1px solid #363630; border-radius: 6px; }
-    [data-testid="stExpander"] summary span { color: #C4A05A; }
+    /* ── Expanders ── */
+    [data-testid="stExpander"] {
+        background-color: var(--obsidian-soft);
+        border: 1px solid rgba(168,159,146,0.10);
+        border-radius: var(--radius-lg);
+    }
+    [data-testid="stExpander"] summary span {
+        font-family: var(--font-ui) !important;
+        font-size: 11px !important;
+        font-weight: 500 !important;
+        letter-spacing: 0.14em !important;
+        text-transform: uppercase;
+        color: var(--gold) !important;
+    }
+    [data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+        border-top: var(--divider);
+    }
 
-    /* Dividers */
-    hr, [data-testid="stSeparator"] { border-color: rgba(168,159,146,0.18) !important; }
+    /* ── Dividers ── */
+    hr, [data-testid="stSeparator"] {
+        border-color: rgba(168,159,146,0.18) !important;
+    }
 
-    /* Sidebar labels */
-    [data-testid="stSidebar"] label { color: #A89F92; }
-    [data-testid="stSidebar"] .stMarkdown p { color: #A89F92; }
-    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
-    [data-testid="stSidebar"] h3 { color: #EDE8E0; }
+    /* ── Progress Bars ── */
+    [data-testid="stProgress"] > div > div {
+        background-color: var(--gold);
+    }
 
-    /* Progress bars */
-    [data-testid="stProgress"] > div > div { background-color: #C4A05A; }
+    /* ── Alerts / Info Boxes ── */
+    [data-testid="stAlert"] {
+        font-family: var(--font-body);
+        border-radius: var(--radius-lg);
+    }
 
-    /* Scrollbar */
-    ::-webkit-scrollbar { width: 8px; }
-    ::-webkit-scrollbar-track { background: #181815; }
-    ::-webkit-scrollbar-thumb { background: #363630; border-radius: 3px; }
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--obsidian); }
+    ::-webkit-scrollbar-thumb { background: var(--obsidian-light); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--stone); }
 
-    /* Captions & small text */
-    .stCaption, small { color: #6B6A62 !important; }
+    /* ── Captions & Small Text ── */
+    .stCaption, small, [data-testid="stCaption"] {
+        font-family: var(--font-body) !important;
+        font-size: 11px !important;
+        color: var(--stone) !important;
+        letter-spacing: 0.04em;
+    }
+
+    /* ── Plotly Charts ── */
+    .js-plotly-plot .plotly .gtitle {
+        font-family: var(--font-display) !important;
+    }
+
+    /* ── Markdown inside main area ── */
+    .stMarkdown p {
+        font-family: var(--font-body);
+        font-size: 14px;
+        line-height: 1.75;
+        color: var(--sand);
+    }
+    .stMarkdown strong { color: var(--ivory); }
+    .stMarkdown a {
+        color: var(--gold);
+        text-decoration: none;
+        border-bottom: 1px solid rgba(196,160,90,0.3);
+        transition: border-color 0.25s;
+    }
+    .stMarkdown a:hover {
+        border-bottom-color: var(--gold);
+    }
+
+    /* ── Subheader styling (used heavily in tabs) ── */
+    .stMarkdown h3 {
+        font-family: var(--font-display) !important;
+        font-weight: 500 !important;
+        color: var(--ivory) !important;
+        padding-bottom: 8px;
+        border-bottom: var(--divider);
+        margin-bottom: 16px !important;
+    }
+
+    /* ── Multiselect tags ── */
+    [data-baseweb="tag"] {
+        font-family: var(--font-ui);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        background-color: var(--obsidian-light) !important;
+        border-radius: var(--radius) !important;
+    }
+
+    /* ── Slider ── */
+    [data-baseweb="slider"] [role="slider"] {
+        background-color: var(--gold) !important;
+    }
+    [data-baseweb="slider"] [data-testid="stThumbValue"] {
+        font-family: var(--font-body);
+        font-size: 12px;
+        color: var(--ivory);
+    }
+
+    /* ── Toast / Notifications ── */
+    [data-testid="stToast"] {
+        font-family: var(--font-body);
+        background-color: var(--obsidian-soft) !important;
+        border: 1px solid var(--obsidian-light) !important;
+        border-radius: var(--radius-lg) !important;
+    }
+
+    /* ── Column gaps ── */
+    [data-testid="column"] {
+        padding: 0 8px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
